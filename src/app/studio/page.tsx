@@ -14,8 +14,8 @@ export default function StudioPage() {
       <header className="mb-8">
         <h1 className="text-2xl font-black text-ink sm:text-3xl">داشبورد لید</h1>
         <p className="mt-2 text-sm leading-7 text-ink-muted">
-          یک کمپین بساز، «کشف لید» را بزن تا کسب‌وکارهای هدف از Google Maps پیدا و
-          راه‌های ارتباطشان استخراج شوند. (تحلیل و پیام در فازهای بعد.)
+          یک کمپین بساز، «کشف لید» را بزن تا کسب‌وکارهای هدف از OpenStreetMap
+          (رایگان) پیدا و راه‌های ارتباطشان استخراج شوند. (تحلیل و پیام در فازهای بعد.)
         </p>
       </header>
       <Studio />

@@ -105,8 +105,10 @@ export function pickPreferredChannel(
 export type ExtractInput = {
   website: string | null;
   phone: string | null;
-  /** هندل اینستاگرامی که جای دیگر پیدا شده (مثلاً از IG discovery) */
+  /** هندل اینستاگرامی که جای دیگر پیدا شده (مثلاً از IG discovery یا تگ OSM) */
   instagramHandle?: string | null;
+  /** کانال‌های آماده از خود منبع (تگ‌های contact:* در OSM) */
+  seedChannels?: Partial<ContactChannels>;
   priority: ChannelKey[];
 };
 
@@ -122,9 +124,9 @@ export type ExtractResult = {
  * (best-effort) می‌خواند و کانال‌های بیشتری استخراج می‌کند.
  */
 export async function extractContactChannels(input: ExtractInput): Promise<ExtractResult> {
-  const channels: ContactChannels = {};
-  if (input.phone) channels.phone = input.phone.replace(/[()\s-]/g, "");
-  if (input.instagramHandle) channels.instagram = input.instagramHandle;
+  const channels: ContactChannels = { ...(input.seedChannels ?? {}) };
+  if (input.phone && !channels.phone) channels.phone = input.phone.replace(/[()\s-]/g, "");
+  if (input.instagramHandle && !channels.instagram) channels.instagram = input.instagramHandle;
 
   if (input.website) {
     const home = await fetchHtml(input.website);

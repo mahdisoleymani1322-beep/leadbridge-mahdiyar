@@ -2,7 +2,9 @@ import "server-only";
 import { randomUUID } from "crypto";
 import { getStore, type Lead } from "@/lib/store";
 import { getMarket, CHANNEL_PRIORITY } from "@/lib/config";
-import { textSearch, isPlacesConfigured, type PlaceResult } from "@/lib/integrations/google-places";
+import { textSearch, isPlacesConfigured } from "@/lib/integrations/google-places";
+import { discoverViaOsm } from "@/lib/integrations/openstreetmap";
+import type { DiscoveredPlace } from "@/lib/integrations/types";
 import { extractContactChannels } from "@/lib/integrations/contact-channels";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
 import { computeDedupKey, validateCandidate, type LeadCandidate } from "@/lib/agents/validation";
@@ -10,14 +12,18 @@ import { computeDedupKey, validateCandidate, type LeadCandidate } from "@/lib/ag
 /**
  * جریان کشف لید (کمپین‌محور) — سرویس قطعی، صفر توکن LLM.
  *
- * Places Text Search → استخراج کانال‌های ارتباط (سایت/IG) → حذف تکراری (dedup) →
- * درج لید با status=NEW. هر گام در agent_runs ثبت می‌شود.
+ * منبع پیش‌فرض: OpenStreetMap (رایگان، بدون کلید). اگر GOOGLE_MAPS_API_KEY
+ * تنظیم شده باشد، از Google Places استفاده می‌شود.
  *
- * فقط APIهای رسمی و داده‌ی عمومی. ارسال هیچ پیامی اینجا رخ نمی‌دهد.
+ * منبع → استخراج کانال‌های ارتباط (تگ‌های OSM + سایت) → حذف تکراری (dedup) →
+ * درج لید با status=NEW. هر گام در agent_runs ثبت می‌شود. فقط داده‌ی عمومی.
  */
+
+export type DiscoverySource = "google_places" | "openstreetmap";
 
 export type DiscoverySummary = {
   campaignId: string;
+  source: DiscoverySource;
   query: string;
   found: number;
   inserted: number;
@@ -33,17 +39,16 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
 
   const campaign = await store.getCampaign(campaignId);
   if (!campaign) throw new Error("کمپین یافت نشد.");
-  if (!isPlacesConfigured()) {
-    throw new Error("GOOGLE_MAPS_API_KEY تنظیم نشده — کشف لید نیاز به کلید Places دارد.");
-  }
 
   const market = getMarket(campaign.market);
-  const terms = market?.queryTerms ?? [campaign.market];
   const limit = campaign.dailyDiscoveryLimit;
+  const useGoogle = isPlacesConfigured();
+  const source: DiscoverySource = useGoogle ? "google_places" : "openstreetmap";
 
   const summary: DiscoverySummary = {
     campaignId,
-    query: `${terms.join(" | ")} — ${campaign.city}`,
+    source,
+    query: `${market?.title ?? campaign.market} — ${campaign.city}`,
     found: 0,
     inserted: 0,
     duplicates: 0,
@@ -52,32 +57,41 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     leadIds: [],
   };
 
-  // ۱) جمع‌آوری نتایج Places تا سقف روزانه (چند عبارت جست‌وجو)
-  const places: PlaceResult[] = [];
-  const seenPlaceIds = new Set<string>();
-  for (const term of terms) {
-    if (places.length >= limit) break;
-    try {
-      const { places: batch } = await textSearch(term, campaign.city, {
-        max: Math.min(20, limit - places.length),
-      });
-      for (const p of batch) {
-        if (p.placeId && !seenPlaceIds.has(p.placeId)) {
-          seenPlaceIds.add(p.placeId);
-          places.push(p);
+  // ۱) جمع‌آوری کسب‌وکارها از منبع
+  let discovered: DiscoveredPlace[] = [];
+  if (useGoogle) {
+    const terms = market?.queryTerms ?? [campaign.market];
+    const seen = new Set<string>();
+    for (const term of terms) {
+      if (discovered.length >= limit) break;
+      try {
+        const { places } = await textSearch(term, campaign.city, {
+          max: Math.min(20, limit - discovered.length),
+        });
+        for (const p of places) {
+          if (p.placeId && !seen.has(p.placeId)) {
+            seen.add(p.placeId);
+            discovered.push(p);
+          }
         }
+      } catch {
+        summary.errors++;
       }
-    } catch {
-      summary.errors++;
     }
+  } else {
+    discovered = await discoverViaOsm(market?.osmTags ?? [], campaign.city, limit);
   }
-  summary.found = places.length;
+  summary.found = discovered.length;
 
   // ۲) استخراج کانال‌ها به‌صورت موازی و دسته‌ای (تا در محیط serverless معلق نماند)
   const igOn = isInstagramConfigured();
-  const target = places.slice(0, limit);
+  const target = discovered.slice(0, limit);
 
-  type Prepared = { place: PlaceResult; candidate: LeadCandidate; extracted: Awaited<ReturnType<typeof extractContactChannels>> };
+  type Prepared = {
+    place: DiscoveredPlace;
+    candidate: LeadCandidate;
+    extracted: Awaited<ReturnType<typeof extractContactChannels>>;
+  };
   const prepared: Prepared[] = [];
 
   const CONCURRENCY = 5;
@@ -89,6 +103,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
           const extracted = await extractContactChannels({
             website: p.website,
             phone: p.phone,
+            instagramHandle: p.instagramHandle ?? null,
+            seedChannels: p.seedChannels,
             priority: CHANNEL_PRIORITY,
           });
           // غنی‌سازی اختیاری اینستاگرام (best-effort؛ فقط اگر هندل و کلید باشد)
@@ -148,7 +164,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       instagramHandle: extracted.instagramHandle,
       contactChannels: extracted.channels,
       preferredChannel: extracted.preferredChannel,
-      source: "google_places",
+      source,
       sourceUrl: p.mapsUri ?? p.website,
       placeId: p.placeId,
       rating: p.rating,
@@ -166,13 +182,13 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     summary.leadIds.push(lead.id);
   }
 
-  // ۳) ثبت اجرای کشف (قابل‌دیباگ؛ صفر توکن)
+  // ۴) ثبت اجرای کشف (قابل‌دیباگ؛ صفر توکن)
   await store.addAgentRun({
     id: randomUUID(),
     leadId: null,
     agentName: "discovery",
     status: summary.errors > 0 && summary.inserted === 0 ? "error" : "done",
-    summary: `کشف «${summary.query}»: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر`,
+    summary: `کشف (${source}) «${summary.query}»: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر`,
     output: summary,
     tokenInput: 0,
     tokenOutput: 0,

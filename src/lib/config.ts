@@ -16,6 +16,8 @@ export type Market = {
   priority: number;
   /** عبارت‌های جست‌وجو برای Google Places Text Search */
   queryTerms: string[];
+  /** تگ‌های OpenStreetMap (Overpass) — منبع پیش‌فرض کشف (رایگان، بدون کلید) */
+  osmTags: string[];
 };
 
 export const MARKETS: Market[] = [
@@ -24,24 +26,35 @@ export const MARKETS: Market[] = [
     title: "کارخانجات و گروه‌های صنعتی",
     priority: 1, // اولویت بالا: ارزش قرارداد بالاتر، ضعف دیجیتال رایج
     queryTerms: ["کارخانه", "شرکت تولیدی", "مجتمع صنعتی", "گروه صنعتی"],
+    osmTags: ["man_made=works", "office=company", "industrial", "craft", "office=industrial"],
   },
   {
     id: "beauty_clinic",
     title: "کلینیک‌های زیبایی و دندان‌پزشکی",
     priority: 2,
     queryTerms: ["کلینیک زیبایی", "کلینیک پوست و مو", "دندان‌پزشکی", "مطب زیبایی"],
+    osmTags: [
+      "amenity=clinic",
+      "amenity=dentist",
+      "amenity=doctors",
+      "shop=beauty",
+      "shop=hairdresser",
+      "healthcare=clinic",
+    ],
   },
   {
     id: "traditional_highrev",
     title: "کسب‌وکارهای سنتی پردرآمد",
     priority: 3,
     queryTerms: ["فروشگاه", "شرکت پخش", "بازرگانی", "تولیدی پوشاک"],
+    osmTags: ["shop=jewelry", "shop=furniture", "shop=clothes", "shop=car", "shop=wholesale"],
   },
   {
     id: "general_ai_fit",
     title: "هر بیزینسی که با AI مشکلاتش حل می‌شود",
     priority: 4,
     queryTerms: ["شرکت خدماتی", "آموزشگاه", "املاک", "مرکز درمانی"],
+    osmTags: ["office=estate_agent", "amenity=school", "office=educational_institution", "office=company"],
   },
 ];
 
