@@ -17,6 +17,8 @@ export type DiscoveredPlace = {
   mapsUri: string | null;
   typeLabel: string | null;
   businessStatus: string | null;
+  /** منبع این رکورد (اگر با بقیه‌ی run فرق دارد؛ مثلاً web_search در کشف ترکیبی) */
+  source?: string;
   /** هندل اینستاگرام اگر منبع مستقیم داشت (مثلاً tag اینستاگرام در OSM) */
   instagramHandle?: string | null;
   /** کانال‌های ارتباطیِ آماده از خود منبع (تگ‌های contact:* در OSM) */

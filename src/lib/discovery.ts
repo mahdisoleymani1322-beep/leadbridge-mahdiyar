@@ -4,6 +4,7 @@ import { getStore, type Lead } from "@/lib/store";
 import { getMarket, CHANNEL_PRIORITY, marketLabel, osmTagsFor, queryTermsFor } from "@/lib/config";
 import { textSearch, isPlacesConfigured } from "@/lib/integrations/google-places";
 import { discoverViaOsm } from "@/lib/integrations/openstreetmap";
+import { discoverViaWebSearch, isWebSearchConfigured } from "@/lib/integrations/web-search";
 import type { DiscoveredPlace } from "@/lib/integrations/types";
 import { extractContactChannels } from "@/lib/integrations/contact-channels";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
@@ -80,6 +81,23 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     }
   } else {
     discovered = await discoverViaOsm(osmTagsFor(campaign.market), campaign.city, limit);
+  }
+
+  // منبع مکمل — جست‌وجوی وب، **در همان دکمه‌ی کشف** (نه دکمه‌ی جدا).
+  // فقط اگر TAVILY_API_KEY تنظیم شده باشد؛ نتایج با OSM ترکیب می‌شوند.
+  if (isWebSearchConfigured()) {
+    const webPlaces = await discoverViaWebSearch(
+      queryTermsFor(campaign.market),
+      campaign.city,
+      Math.min(limit, 15)
+    );
+    const seenIds = new Set(discovered.map((p) => p.placeId));
+    for (const wp of webPlaces) {
+      if (!seenIds.has(wp.placeId)) {
+        seenIds.add(wp.placeId);
+        discovered.push(wp);
+      }
+    }
   }
   summary.found = discovered.length;
 
@@ -164,7 +182,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       instagramHandle: extracted.instagramHandle,
       contactChannels: extracted.channels,
       preferredChannel: extracted.preferredChannel,
-      source,
+      source: p.source ?? source,
       sourceUrl: p.mapsUri ?? p.website,
       placeId: p.placeId,
       rating: p.rating,
