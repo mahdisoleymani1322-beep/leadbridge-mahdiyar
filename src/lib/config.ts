@@ -62,8 +62,42 @@ export function getMarket(id: string): Market | undefined {
   return MARKETS.find((m) => m.id === id);
 }
 
-/** بازار پیش‌فرض کمپین جدید — اولویت با صنعتی */
-export const DEFAULT_MARKET_ID = "industrial";
+/** شناسه‌ی ویژه‌ی «همه‌ی بازارها با هم» (کشف ترکیبی) */
+export const ALL_MARKET_ID = "all";
+
+/** آیا این کمپین همه‌ی بازارها را با هم هدف می‌گیرد؟ */
+export function isAllMarkets(id: string): boolean {
+  return id === ALL_MARKET_ID;
+}
+
+/** برچسب نمایشی بازار (شامل حالت ترکیبی) */
+export function marketLabel(id: string): string {
+  if (isAllMarkets(id)) return "همه‌ی بازارها (ترکیبی)";
+  return getMarket(id)?.title ?? id;
+}
+
+/** اجتماع (union) تگ‌های OSM همه‌ی بازارها — برای کشف ترکیبی */
+export function combinedOsmTags(): string[] {
+  return Array.from(new Set(MARKETS.flatMap((m) => m.osmTags)));
+}
+
+/** اجتماع عبارت‌های جست‌وجوی همه‌ی بازارها (برای Google) */
+export function combinedQueryTerms(): string[] {
+  return Array.from(new Set(MARKETS.flatMap((m) => m.queryTerms)));
+}
+
+/** تگ‌های OSM متناسب با بازار (یا ترکیبی) */
+export function osmTagsFor(marketId: string): string[] {
+  return isAllMarkets(marketId) ? combinedOsmTags() : getMarket(marketId)?.osmTags ?? [];
+}
+
+/** عبارت‌های جست‌وجوی متناسب با بازار (یا ترکیبی) */
+export function queryTermsFor(marketId: string): string[] {
+  return isAllMarkets(marketId) ? combinedQueryTerms() : getMarket(marketId)?.queryTerms ?? [marketId];
+}
+
+/** بازار پیش‌فرض کمپین جدید — ترکیبی (همه با هم) */
+export const DEFAULT_MARKET_ID = ALL_MARKET_ID;
 
 /* ── سقف‌های پایلوت ────────────────────────────────────────── */
 

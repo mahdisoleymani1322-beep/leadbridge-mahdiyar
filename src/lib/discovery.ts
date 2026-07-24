@@ -1,7 +1,7 @@
 import "server-only";
 import { randomUUID } from "crypto";
 import { getStore, type Lead } from "@/lib/store";
-import { getMarket, CHANNEL_PRIORITY } from "@/lib/config";
+import { getMarket, CHANNEL_PRIORITY, marketLabel, osmTagsFor, queryTermsFor } from "@/lib/config";
 import { textSearch, isPlacesConfigured } from "@/lib/integrations/google-places";
 import { discoverViaOsm } from "@/lib/integrations/openstreetmap";
 import type { DiscoveredPlace } from "@/lib/integrations/types";
@@ -48,7 +48,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
   const summary: DiscoverySummary = {
     campaignId,
     source,
-    query: `${market?.title ?? campaign.market} — ${campaign.city}`,
+    query: `${marketLabel(campaign.market)} — ${campaign.city}`,
     found: 0,
     inserted: 0,
     duplicates: 0,
@@ -60,7 +60,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
   // ۱) جمع‌آوری کسب‌وکارها از منبع
   let discovered: DiscoveredPlace[] = [];
   if (useGoogle) {
-    const terms = market?.queryTerms ?? [campaign.market];
+    const terms = queryTermsFor(campaign.market);
     const seen = new Set<string>();
     for (const term of terms) {
       if (discovered.length >= limit) break;
@@ -79,7 +79,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       }
     }
   } else {
-    discovered = await discoverViaOsm(market?.osmTags ?? [], campaign.city, limit);
+    discovered = await discoverViaOsm(osmTagsFor(campaign.market), campaign.city, limit);
   }
   summary.found = discovered.length;
 

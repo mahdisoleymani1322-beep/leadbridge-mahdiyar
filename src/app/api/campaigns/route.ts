@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { randomUUID } from "crypto";
 import { getStore, type Campaign } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
-import { DEFAULT_CITY, DEFAULT_MARKET_ID, LIMITS, getMarket } from "@/lib/config";
+import { DEFAULT_CITY, DEFAULT_MARKET_ID, LIMITS, getMarket, isAllMarkets, marketLabel } from "@/lib/config";
 import { SERVICES } from "@/lib/brand";
 
 export const dynamic = "force-dynamic";
@@ -19,13 +19,16 @@ export async function POST(req: NextRequest) {
   if (!isStudioAuthorized(req)) return unauthorized();
 
   const body = await req.json().catch(() => ({}));
-  const market = typeof body.market === "string" && getMarket(body.market) ? body.market : DEFAULT_MARKET_ID;
+  const market =
+    typeof body.market === "string" && (isAllMarkets(body.market) || getMarket(body.market))
+      ? body.market
+      : DEFAULT_MARKET_ID;
   const city = typeof body.city === "string" && body.city.trim() ? body.city.trim() : DEFAULT_CITY;
   const primaryService =
     typeof body.primaryService === "string" && SERVICES.some((s) => s.id === body.primaryService)
       ? body.primaryService
       : SERVICES[0].id;
-  const marketTitle = getMarket(market)?.title ?? market;
+  const marketTitle = marketLabel(market);
 
   const campaign: Campaign = {
     id: randomUUID(),

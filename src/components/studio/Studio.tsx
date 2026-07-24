@@ -62,13 +62,21 @@ export function Studio() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
-  const [busy, setBusy] = useState<null | "load" | "create" | "discover">(null);
+  const [busy, setBusy] = useState<null | "load" | "create" | "discover" | "manual" | "csv">(null);
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
-  const [market, setMarket] = useState(MARKETS[0]?.id ?? "");
+  const [market, setMarket] = useState("all"); // پیش‌فرض: همه‌ی بازارها ترکیبی
   const [city, setCity] = useState("تهران");
   const [service, setService] = useState(SERVICES[0]?.id ?? "");
+
+  // افزودن دستی لید
+  const [mName, setMName] = useState("");
+  const [mInstagram, setMInstagram] = useState("");
+  const [mPhone, setMPhone] = useState("");
+  const [mWebsite, setMWebsite] = useState("");
+  const [mCity, setMCity] = useState("تهران");
+  const [csv, setCsv] = useState("");
 
   const loadCampaigns = useCallback(async () => {
     const { campaigns } = await api<{ campaigns: Campaign[] }>("/api/campaigns");
@@ -154,6 +162,68 @@ export function Studio() {
     }
   }
 
+  async function addManualLead(e: FormEvent) {
+    e.preventDefault();
+    setBusy("manual");
+    setError("");
+    setNotice("");
+    try {
+      await api("/api/leads", {
+        method: "POST",
+        body: JSON.stringify({
+          campaignId: selectedId || null,
+          businessName: mName,
+          city: mCity,
+          instagram: mInstagram,
+          phone: mPhone,
+          website: mWebsite,
+        }),
+      });
+      setMName("");
+      setMInstagram("");
+      setMPhone("");
+      setMWebsite("");
+      setNotice("لید دستی اضافه شد.");
+      if (selectedId) await loadLeads(selectedId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function importCsv() {
+    setBusy("csv");
+    setError("");
+    setNotice("");
+    try {
+      const leads = csv
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const [businessName, instagram, phone, website] = line.split(",").map((s) => (s ?? "").trim());
+          return { businessName, instagram, phone, website, city: mCity };
+        })
+        .filter((x) => x.businessName);
+      if (leads.length === 0) {
+        setError("هیچ ردیف معتبری در متن CSV نبود.");
+        return;
+      }
+      const res = await api<{ inserted: number; duplicates: number; invalid: number }>("/api/leads", {
+        method: "POST",
+        body: JSON.stringify({ campaignId: selectedId || null, leads }),
+      });
+      setCsv("");
+      setNotice(`ورود CSV: ${res.inserted} افزوده، ${res.duplicates} تکراری، ${res.invalid} نامعتبر.`);
+      if (selectedId) await loadLeads(selectedId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="space-y-10">
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
@@ -189,6 +259,7 @@ export function Studio() {
               onChange={(e) => setMarket(e.target.value)}
               className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
             >
+              <option value="all">همه‌ی بازارها (ترکیبی)</option>
               {MARKETS.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.title}
@@ -299,6 +370,103 @@ export function Studio() {
             })}
           </ul>
         )}
+      </section>
+
+      {/* ── افزودن دستی / CSV ── */}
+      <section aria-labelledby="manual-heading">
+        <h2 id="manual-heading" className="mb-2 text-lg font-extrabold text-ink">
+          افزودن دستی لید
+        </h2>
+        <p className="mb-4 text-xs text-ink-muted">
+          کسب‌وکارهایی که خودت پیدا کرده‌ای را اینجا اضافه کن (به کمپین انتخاب‌شده وصل می‌شوند).
+        </p>
+
+        <form
+          onSubmit={addManualLead}
+          className="grid gap-4 rounded-xl border border-surface-line bg-surface p-5 shadow-card sm:grid-cols-2 lg:grid-cols-4"
+        >
+          <div className="flex flex-col gap-1">
+            <label htmlFor="m-name" className="text-sm font-medium text-ink">
+              نام کسب‌وکار *
+            </label>
+            <input
+              id="m-name"
+              required
+              value={mName}
+              onChange={(e) => setMName(e.target.value)}
+              className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="m-ig" className="text-sm font-medium text-ink">
+              اینستاگرام
+            </label>
+            <input
+              id="m-ig"
+              value={mInstagram}
+              onChange={(e) => setMInstagram(e.target.value)}
+              placeholder="@handle یا لینک"
+              dir="ltr"
+              className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="m-phone" className="text-sm font-medium text-ink">
+              تلفن
+            </label>
+            <input
+              id="m-phone"
+              value={mPhone}
+              onChange={(e) => setMPhone(e.target.value)}
+              dir="ltr"
+              className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="m-web" className="text-sm font-medium text-ink">
+              وب‌سایت
+            </label>
+            <input
+              id="m-web"
+              value={mWebsite}
+              onChange={(e) => setMWebsite(e.target.value)}
+              dir="ltr"
+              className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
+            />
+          </div>
+          <div className="sm:col-span-2 lg:col-span-4">
+            <button
+              type="submit"
+              disabled={busy === "manual"}
+              className="rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700 disabled:opacity-60"
+            >
+              {busy === "manual" ? "در حال افزودن…" : "افزودن لید"}
+            </button>
+          </div>
+        </form>
+
+        <div className="mt-4 rounded-xl border border-surface-line bg-surface p-5 shadow-card">
+          <label htmlFor="csv" className="text-sm font-medium text-ink">
+            ورود انبوه (CSV) — هر خط یک کسب‌وکار: <span dir="ltr">نام, اینستاگرام, تلفن, سایت</span>
+          </label>
+          <textarea
+            id="csv"
+            value={csv}
+            onChange={(e) => setCsv(e.target.value)}
+            rows={4}
+            dir="ltr"
+            placeholder="کلینیک نمونه, @clinic_ig, 02112345678, https://example.com"
+            className="mt-2 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
+          />
+          <button
+            type="button"
+            onClick={importCsv}
+            disabled={busy === "csv" || !csv.trim()}
+            className="mt-3 rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark disabled:opacity-60"
+          >
+            {busy === "csv" ? "در حال ورود…" : "ورود انبوه از CSV"}
+          </button>
+        </div>
       </section>
 
       {/* ── لیدها ── */}
