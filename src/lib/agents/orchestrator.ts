@@ -39,6 +39,161 @@ export type PipelineResult = {
   stopReason: string;
 };
 
+/* ── اجرای گام‌به‌گام (برای اتصال‌های کند/ناپایدار) ──────────
+ *
+ * چرا: اجرای کل یک لید ~۳۵ ثانیه طول می‌کشد و درخواست HTTP آن‌قدر باز می‌ماند
+ * که پروکسی/شبکه‌های کند آن را قطع می‌کنند (NetworkError). با اجرای «یک گام در
+ * هر درخواست»، هر فراخوان ~۱۰ ثانیه است و کلاینت گام‌ها را پشت‌سرهم می‌زند.
+ * مزیت دوم: پیشرفت واقعی و از سرگیری بعد از خطا.
+ */
+
+export type StepResult = {
+  leadId: string;
+  /** گامی که همین حالا اجرا شد */
+  ran: "analysis" | "service-match" | "portfolio-select" | "none";
+  status: LeadStatus;
+  score: number | null;
+  /** آیا این لید کارش تمام شده؟ (دیگر گامی نمانده) */
+  done: boolean;
+  summary: string;
+};
+
+/** یک گام از پردازش لید را اجرا می‌کند و وضعیت بعدی را برمی‌گرداند. */
+export async function runLeadStep(leadId: string): Promise<StepResult> {
+  const store = getStore();
+  const lead = await store.getLead(leadId);
+  if (!lead) throw new Error("لید یافت نشد.");
+
+  const existing = await store.getAnalysis(leadId);
+  const started = Date.now();
+
+  const logRun = async (agent: string, status: "done" | "error", summary: string, output: unknown) => {
+    await store.addAgentRun({
+      id: randomUUID(),
+      leadId,
+      agentName: agent,
+      status,
+      summary,
+      output,
+      tokenInput: null,
+      tokenOutput: null,
+      cost: null,
+      durationMs: Date.now() - started,
+      stopReason: status === "done" ? "ok" : "error",
+      errorCode: null,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
+  // ── گام ۱: تحلیل + امتیازدهی (اگر هنوز تحلیل نشده) ──
+  if (!existing) {
+    await store.updateLead(leadId, { status: "ANALYZING" });
+    const igProfile =
+      isInstagramConfigured() && lead.instagramHandle
+        ? await businessDiscovery(lead.instagramHandle)
+        : null;
+
+    const analysis = await runLeadAnalysis({ lead, igProfile });
+    await store.upsertAnalysis({
+      id: randomUUID(),
+      leadId,
+      businessSummary: analysis.businessSummary,
+      targetCustomer: analysis.targetCustomer,
+      painPoint: analysis.painPoint,
+      needSignals: analysis.needSignals,
+      evidence: analysis.evidence,
+      uncertainties: analysis.uncertainties,
+      brandTone: analysis.brandTone,
+      recommendedService: "",
+      riskFlags: analysis.riskFlags,
+      confidence: analysis.confidence,
+      agentVersion: "v1",
+      createdAt: new Date().toISOString(),
+    });
+    await logRun("lead-analysis", "done", `درد: ${analysis.painPoint.slice(0, 80)}…`, analysis);
+
+    // امتیازدهی قطعی (صفر توکن) — بلافاصله بعد از تحلیل
+    const sc = scoreLead(lead, analysis);
+    const nextStatus: LeadStatus =
+      sc.decision === "PASS" ? "SCORED" : sc.decision === "NURTURE" ? "NURTURE" : "REJECTED";
+    await store.updateLead(leadId, {
+      status: nextStatus,
+      score: sc.score,
+      confidence: analysis.confidence,
+    });
+    await logRun("scoring", "done", sc.reason, sc);
+
+    return {
+      leadId,
+      ran: "analysis",
+      status: nextStatus,
+      score: sc.score,
+      done: sc.decision !== "PASS", // فقط لیدهای PASS گام بعدی دارند
+      summary: sc.reason,
+    };
+  }
+
+  // ── گام ۲: انتخاب خدمت (اگر تحلیل هست ولی خدمت انتخاب نشده) ──
+  if (!existing.recommendedService) {
+    if (lead.status !== "SCORED") {
+      return { leadId, ran: "none", status: lead.status, score: lead.score, done: true, summary: "گام دیگری لازم نیست." };
+    }
+    const match = await runServiceMatch({
+      businessName: lead.businessName,
+      analysis: {
+        businessSummary: existing.businessSummary,
+        targetCustomer: existing.targetCustomer,
+        painPoint: existing.painPoint,
+        needSignals: existing.needSignals,
+        evidence: existing.evidence,
+        uncertainties: existing.uncertainties,
+        brandTone: existing.brandTone,
+        riskFlags: existing.riskFlags,
+        confidence: existing.confidence,
+      },
+    });
+    await store.upsertAnalysis({ ...existing, recommendedService: match.serviceId });
+    await logRun("service-match", "done", `خدمت: ${match.serviceId}`, match);
+    return {
+      leadId,
+      ran: "service-match",
+      status: lead.status,
+      score: lead.score,
+      done: false,
+      summary: `خدمت انتخاب شد: ${match.serviceId}`,
+    };
+  }
+
+  // ── گام ۳: انتخاب نمونه‌کار → آماده‌ی پیام ──
+  if (lead.status === "SCORED") {
+    const items = await store.listPortfolio({ approvedOnly: true });
+    const sel = await runPortfolioSelect({
+      businessName: lead.businessName,
+      industry: lead.industry,
+      painPoint: existing.painPoint,
+      serviceId: existing.recommendedService,
+      portfolio: items,
+    });
+    await logRun(
+      "portfolio-select",
+      "done",
+      sel.selectedIds.length ? `${sel.selectedIds.length} نمونه‌کار پیشنهاد شد` : "نمونه‌کار مرتبطی نبود",
+      sel
+    );
+    await store.updateLead(leadId, { status: "READY_FOR_MESSAGE" });
+    return {
+      leadId,
+      ran: "portfolio-select",
+      status: "READY_FOR_MESSAGE",
+      score: lead.score,
+      done: true,
+      summary: "آماده‌ی تولید پیام.",
+    };
+  }
+
+  return { leadId, ran: "none", status: lead.status, score: lead.score, done: true, summary: "گام دیگری لازم نیست." };
+}
+
 /** هش ورودی — برای جلوگیری از تکرار یک ایجنت با ورودی یکسان */
 function inputHash(agent: string, payload: unknown): string {
   return createHash("sha1").update(agent + JSON.stringify(payload)).digest("hex").slice(0, 16);

@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { isConfigured } from "@/lib/ai";
-import { runLeadPipeline } from "@/lib/agents/orchestrator";
+import { runLeadPipeline, runLeadStep } from "@/lib/agents/orchestrator";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -32,29 +32,42 @@ export async function POST(req: NextRequest) {
       return Response.json({ results: [result] });
     }
 
-    // حالت کمپین — یک لید در هر درخواست پردازش می‌شود.
+    // حالت کمپین — **یک گام** در هر درخواست.
     //
-    // چرا فقط یکی: هر لید ~۳۰ ثانیه (۳ فراخوان مدل) طول می‌کشد و سقف زمان تابع
-    // روی Vercel رایگان ۶۰ ثانیه است. پردازش چند لید در یک درخواست → خطای 504.
-    // کلاینت این را پشت‌سرهم صدا می‌زند تا هم تایم‌اوت نشود و هم پیشرفت واقعی
-    // نمایش دهد. `remaining` تعداد باقی‌مانده پس از این لید است.
+    // چرا گام‌به‌گام: اجرای کل یک لید ~۳۵ ثانیه است و درخواست HTTP آن‌قدر باز
+    // می‌ماند که شبکه‌های کند/پروکسی قطعش می‌کنند (NetworkError) یا به سقف
+    // ۶۰ ثانیه‌ای تابع می‌خورد (504). هر گام ~۱۰ ثانیه است و کلاینت گام‌ها را
+    // پشت‌سرهم می‌زند تا همه‌ی لیدها تمام شوند.
     if (typeof body.campaignId === "string" && body.campaignId) {
       const store = getStore();
-      const pending = await store.listLeads({
+
+      // لید در حال پردازش (SCORED = تحلیل شده ولی گام‌های بعدی مانده) اولویت دارد،
+      // تا کار نیمه‌تمام رها نشود؛ بعد سراغ لید تحلیل‌نشده‌ی بعدی می‌رویم.
+      const inProgress = await store.listLeads({
+        campaignId: body.campaignId,
+        status: "SCORED",
+        limit: 1,
+      });
+      const fresh = await store.listLeads({
         campaignId: body.campaignId,
         status: "NEW",
         limit: 500,
       });
 
-      if (pending.length === 0) {
-        return Response.json({ results: [], processed: 0, remaining: 0 });
+      const target = inProgress[0] ?? fresh[0];
+      if (!target) {
+        return Response.json({ step: null, remaining: 0, done: true });
       }
 
-      const result = await runLeadPipeline(pending[0].id);
+      const step = await runLeadStep(target.id);
+      // «باقی‌مانده» = لیدهایی که هنوز تحلیل نشده‌اند (برای نمایش پیشرفت)
+      const remaining = step.ran === "analysis" ? fresh.length - 1 : fresh.length;
+
       return Response.json({
-        results: [result],
-        processed: 1,
-        remaining: pending.length - 1,
+        step,
+        businessName: target.businessName,
+        remaining,
+        done: false,
       });
     }
 

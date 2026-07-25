@@ -401,52 +401,62 @@ export function Studio() {
    */
   async function analyzeBatch() {
     if (batchRunning || analyzingId || !selectedId) return;
-    const BATCH_PER_CLICK = 5;
+
+    // سقف ایمنی فقط برای جلوگیری از حلقه‌ی بی‌پایان در صورت باگ سرور —
+    // نه محدودیت کاربر. هر لید حداکثر ۳ گام دارد.
+    const MAX_STEPS = 600;
 
     setBatchRunning(true);
     setError("");
     setNotice("");
     setTaskStatus(
-      `تحلیل گروهی شروع شد. تا ${fa(BATCH_PER_CLICK)} لید در این نوبت پردازش می‌شود؛ هر لید حدود نیم دقیقه. ` +
+      "تحلیل گروهی شروع شد. لیدها یکی‌یکی و پشت‌سرهم تحلیل می‌شوند تا همه تمام شوند. " +
         "دکمه‌های «تحلیل لید» در جدول تا پایان کار غیرفعال هستند."
     );
 
-    let done = 0;
-    let left: number | null = null;
+    let analyzed = 0; // تعداد لیدهایی که تحلیلشان کامل شد
     try {
-      for (let i = 0; i < BATCH_PER_CLICK; i++) {
-        const res = await api<{ processed: number; remaining: number }>("/api/pipeline", {
+      for (let i = 0; i < MAX_STEPS; i++) {
+        const res = await api<{
+          step: { ran: string; status: string; score: number | null } | null;
+          businessName?: string;
+          remaining: number;
+          done: boolean;
+        }>("/api/pipeline", {
           method: "POST",
           body: JSON.stringify({ campaignId: selectedId }),
         });
-        if (res.processed === 0) {
-          left = 0;
-          break; // چیزی برای تحلیل نمانده
-        }
-        done += res.processed;
-        left = res.remaining;
+
+        if (res.done || !res.step) break; // چیزی برای پردازش نمانده
+
         setRemaining(res.remaining);
-        // پیشرفت واقعی پس از هر لید (~هر ۳۰ ثانیه یک اعلان معنادار)
-        setTaskStatus(
-          `${fa(done)} لید تحلیل شد؛ ${fa(res.remaining)} لید باقی مانده. در حال ادامه…`
-        );
-        if (res.remaining === 0) break;
+
+        // فقط وقتی یک لید تحلیل و امتیازدهی شد اعلام کن (نه هر گام ریز)
+        if (res.step.ran === "analysis") {
+          analyzed++;
+          setTaskStatus(
+            `«${res.businessName ?? "لید"}» تحلیل شد` +
+              (res.step.score != null ? ` — امتیاز ${fa(res.step.score)}` : "") +
+              `. ${fa(res.remaining)} لید باقی مانده. در حال ادامه…`
+          );
+          // جدول را در حین کار به‌روز نگه دار تا پیشرفت دیده شود
+          await loadLeads(selectedId).catch(() => {});
+        }
       }
 
       await loadLeads(selectedId);
       setTaskStatus(
-        `تحلیل گروهی تمام شد. ${fa(done)} لید تحلیل شد. ` +
-          `${left != null ? fa(left) : "—"} لید باقی مانده. جدول لیدها به‌روزرسانی شد.`
+        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد. جدول لیدها به‌روزرسانی شد.`
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(
-        done > 0
-          ? `${fa(done)} لید تحلیل شد، سپس خطا رخ داد: ${msg}`
+        analyzed > 0
+          ? `${fa(analyzed)} لید تحلیل شد، سپس خطا رخ داد: ${msg} — می‌توانید دوباره دکمه را بزنید تا ادامه دهد.`
           : `تحلیل گروهی ناموفق بود: ${msg}`
       );
       setTaskStatus("");
-      if (done > 0) await loadLeads(selectedId).catch(() => {});
+      await loadLeads(selectedId).catch(() => {});
     } finally {
       setBatchRunning(false);
     }
@@ -694,8 +704,8 @@ export function Studio() {
           {!selectedId
             ? "ابتدا یک کمپین انتخاب کنید."
             : remaining === null
-              ? "هر بار تا ۵ لید پردازش می‌شود (هر لید حدود نیم دقیقه)."
-              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. هر بار تا ۵ لید پردازش می‌شود (هر لید حدود نیم دقیقه).`}
+              ? "همه‌ی لیدها یکی‌یکی و پشت‌سرهم تحلیل می‌شوند (هر لید حدود نیم دقیقه)."
+              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. با یک بار زدن، همه یکی‌یکی تا آخر تحلیل می‌شوند (هر لید حدود نیم دقیقه).`}
         </p>
 
         {campaigns.length === 0 ? (
