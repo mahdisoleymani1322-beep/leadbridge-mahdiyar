@@ -168,6 +168,12 @@ export const CRITIC_THRESHOLDS = {
 /** حداکثر دور بازنویسی پیام؛ بعد از آن → Human Review */
 export const MAX_REVISION_ROUNDS = 2;
 
+/**
+ * گاردریل حلقه‌ی بی‌نهایت (نقشه‌راه §14/§32): سقف گام‌های ارکستریتور برای هر
+ * لید در یک اجرا. اگر پر شد، اجرا با stop_reason=MAX_STEPS متوقف می‌شود.
+ */
+export const MAX_STEPS_PER_LEAD = 10;
+
 /* ── قواعد پیام (نقشه‌راه §22) ─────────────────────────────── */
 
 export const MESSAGE_RULES = {

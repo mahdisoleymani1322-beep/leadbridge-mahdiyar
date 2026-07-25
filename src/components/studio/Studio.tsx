@@ -1,9 +1,57 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
-import type { Campaign, Lead, ContactChannels, ChannelKey } from "@/lib/store/types";
-import { MARKETS } from "@/lib/config";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import type {
+  Campaign,
+  Lead,
+  ContactChannels,
+  ChannelKey,
+  LeadStatus,
+  LeadAnalysis,
+  AgentRun,
+  AgentRunStatus,
+} from "@/lib/store/types";
+import { MARKETS, SCORING_WEIGHTS, type ScoringCriterion } from "@/lib/config";
 import { SERVICES } from "@/lib/brand";
+
+/** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
+const fa = (n: number | string) => new Intl.NumberFormat("fa-IR").format(Number(n));
+
+/** برچسب فارسی وضعیت لید — به‌جای نمایش خام enum */
+const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
+  NEW: "جدید",
+  VALIDATING: "در حال اعتبارسنجی",
+  INVALID: "نامعتبر",
+  DUPLICATE: "تکراری",
+  ANALYZING: "در حال تحلیل",
+  SCORED: "امتیازدهی‌شده",
+  REJECTED: "رد شده",
+  NURTURE: "نگه‌داری",
+  READY_FOR_MESSAGE: "آماده‌ی پیام",
+  MESSAGE_DRAFTED: "پیش‌نویس پیام",
+  MESSAGE_REVIEW: "بازبینی پیام",
+  APPROVED: "تأییدشده",
+  SENT: "ارسال‌شده",
+  REPLIED: "پاسخ داده",
+  HANDOVER_READY: "آماده‌ی تحویل",
+  HANDED_OVER: "تحویل‌شده",
+};
+
+const RUN_STATUS_LABELS: Record<AgentRunStatus, string> = {
+  running: "در حال اجرا",
+  done: "موفق",
+  error: "خطا",
+};
+
+const CRITERION_LABELS: Record<ScoringCriterion, string> = {
+  marketFit: "تناسب با بازار هدف",
+  visibleNeed: "نیاز آشکار",
+  infoCredibility: "اعتبار اطلاعات",
+  onlineActivity: "فعالیت آنلاین",
+  portfolioFit: "تناسب نمونه‌کار",
+  decisionMakerAccess: "دسترسی به تصمیم‌گیرنده",
+  lowRisk: "ریسک پایین",
+};
 
 /* ── کمکی fetch با هدر رمز استودیو (در صورت وجود) ─────────── */
 
@@ -45,12 +93,153 @@ function Channels({ channels }: { channels: ContactChannels }) {
         <li
           key={k}
           className="rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700"
-          title={String(channels[k])}
         >
           {CHANNEL_LABELS[k]}
+          {/* مقدار واقعی برای screen reader — title روی li خوانده نمی‌شود */}
+          <span className="sr-only">: {String(channels[k])}</span>
         </li>
       ))}
     </ul>
+  );
+}
+
+/* ── پنل جزئیات لید (تحلیل + ریز امتیاز + تایم‌لاین) ───────── */
+
+type LeadDetail = { lead: Lead; analysis: LeadAnalysis | null; runs: AgentRun[] };
+
+function LeadPanel({ lead, detail, onClose }: { lead: Lead; detail: LeadDetail | null; onClose: () => void }) {
+  if (!detail) {
+    return <p className="text-sm text-ink-muted">در حال بارگذاری جزئیات…</p>;
+  }
+  const a = detail.analysis;
+
+  return (
+    <div className="space-y-5">
+      <h3 className="text-base font-extrabold text-ink">جزئیات تحلیل — {lead.businessName}</h3>
+
+      {!a ? (
+        <p className="text-sm text-ink-muted">
+          هنوز تحلیل نشده است. دکمه‌ی «تحلیل لید» را در همین ردیف بزنید.
+        </p>
+      ) : (
+        <>
+          {/* درد اصلی — یافته‌ی کلیدی */}
+          <section>
+            <h4 className="text-sm font-extrabold text-ink">درد اصلی</h4>
+            <p className="mt-1 rounded-lg border-e-4 border-brand-600 bg-surface px-3 py-2 text-sm leading-7 text-ink">
+              {a.painPoint}
+            </p>
+          </section>
+
+          <section>
+            <h4 className="text-sm font-extrabold text-ink">خلاصه‌ی کسب‌وکار</h4>
+            <p className="mt-1 text-sm leading-7 text-ink-muted">{a.businessSummary}</p>
+            <p className="mt-1 text-sm text-ink-muted">مشتری هدف: {a.targetCustomer}</p>
+          </section>
+
+          {a.evidence.length > 0 && (
+            <section>
+              <h4 id={`ev-h-${lead.id}`} className="text-sm font-extrabold text-ink">شواهد</h4>
+              <ul aria-labelledby={`ev-h-${lead.id}`} className="mt-1 space-y-1 text-sm text-ink-muted">
+                {a.evidence.map((e, i) => (
+                  <li key={i}>• {e}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {a.needSignals.length > 0 && (
+            <section>
+              <h4 id={`ns-h-${lead.id}`} className="text-sm font-extrabold text-ink">نشانه‌های نیاز</h4>
+              <ul aria-labelledby={`ns-h-${lead.id}`} className="mt-1 space-y-1 text-sm text-ink-muted">
+                {a.needSignals.map((s, i) => (
+                  <li key={i}>• {s}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {a.uncertainties.length > 0 && (
+            <section>
+              <h4 id={`un-h-${lead.id}`} className="text-sm font-extrabold text-ink">موارد نامطمئن</h4>
+              <ul aria-labelledby={`un-h-${lead.id}`} className="mt-1 space-y-1 text-sm text-ink-muted">
+                {a.uncertainties.map((u, i) => (
+                  <li key={i}>• {u}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {a.recommendedService && (
+            <section>
+              <h4 className="text-sm font-extrabold text-ink">خدمت پیشنهادی</h4>
+              <p className="mt-1 text-sm text-ink">
+                {SERVICES.find((s) => s.id === a.recommendedService)?.title ?? a.recommendedService}
+              </p>
+            </section>
+          )}
+        </>
+      )}
+
+      {/* ریز امتیاز — وزن‌های قطعی از config */}
+      {lead.score != null && (
+        <section>
+          <h4 id={`score-h-${lead.id}`} className="text-sm font-extrabold text-ink">
+            ریز امتیاز
+          </h4>
+          <p className="mt-1 text-sm text-ink">
+            امتیاز کل: <bdi>{fa(lead.score)}</bdi> از ۱۰۰ — وضعیت: {LEAD_STATUS_LABELS[lead.status]}
+          </p>
+          <dl aria-labelledby={`score-h-${lead.id}`} className="mt-2 grid gap-2 sm:grid-cols-2">
+            {(Object.keys(SCORING_WEIGHTS) as ScoringCriterion[]).map((k) => (
+              <div key={k} className="flex items-baseline justify-between gap-3">
+                <dt className="text-sm text-ink">
+                  {CRITERION_LABELS[k]}{" "}
+                  <span className="text-ink-muted">
+                    (وزن <bdi>{fa(SCORING_WEIGHTS[k])}</bdi>)
+                  </span>
+                </dt>
+                <dd className="text-sm font-bold text-ink">
+                  <bdi>{fa(SCORING_WEIGHTS[k])}</bdi> امتیاز ممکن
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+
+      {/* تایم‌لاین اجرای ایجنت‌ها */}
+      {detail.runs.length > 0 && (
+        <section>
+          <h4 id={`runs-h-${lead.id}`} className="text-sm font-extrabold text-ink">
+            تایم‌لاین اجرای ایجنت‌ها
+          </h4>
+          <ol aria-labelledby={`runs-h-${lead.id}`} className="mt-2 space-y-2">
+            {detail.runs.map((r) => (
+              <li key={r.id} className="rounded-lg border border-surface-line bg-surface p-3">
+                <p className="font-bold text-ink">
+                  <bdi>{r.agentName}</bdi>
+                  {" — "}
+                  <span className={r.status === "error" ? "text-danger" : "text-success"}>
+                    <span aria-hidden="true">{r.status === "error" ? "✕ " : "✓ "}</span>
+                    {RUN_STATUS_LABELS[r.status]}
+                  </span>
+                </p>
+                <p className="mt-1 text-sm leading-6 text-ink-muted">{r.summary}</p>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      <button
+        type="button"
+        onClick={onClose}
+        className="rounded-lg border border-surface-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
+      >
+        بستن جزئیات
+      </button>
+    </div>
   );
 }
 
@@ -63,6 +252,13 @@ export function Studio() {
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
   const [busy, setBusy] = useState<null | "load" | "create" | "discover" | "manual" | "csv">(null);
+
+  // تحلیل لید (فاز ۳)
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [taskStatus, setTaskStatus] = useState(""); // کانال اعلان زنده‌ی جدا
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, LeadDetail>>({});
+  const triggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
@@ -162,6 +358,54 @@ export function Studio() {
     }
   }
 
+  /** اجرای خط تولید تحلیل روی یک لید (ایجنت‌های فاز ۳) */
+  async function analyze(lead: Lead) {
+    if (analyzingId) return; // گارد: یکی در یک زمان
+    setAnalyzingId(lead.id);
+    setError("");
+    setTaskStatus(`تحلیل «${lead.businessName}» شروع شد. این کار ممکن است تا یک دقیقه طول بکشد.`);
+    try {
+      const res = await api<{ results: { finalStatus: LeadStatus; score: number | null }[] }>(
+        "/api/pipeline",
+        { method: "POST", body: JSON.stringify({ leadId: lead.id }) }
+      );
+      const r = res.results[0];
+      setTaskStatus(
+        `تحلیل «${lead.businessName}» کامل شد. امتیاز ${r?.score != null ? fa(r.score) : "—"} از ۱۰۰ — وضعیت: ${
+          r ? LEAD_STATUS_LABELS[r.finalStatus] : "نامشخص"
+        }.`
+      );
+      if (selectedId) await loadLeads(selectedId);
+      await loadDetail(lead.id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`تحلیل «${lead.businessName}» ناموفق بود: ${msg}`);
+      setTaskStatus("");
+    } finally {
+      setAnalyzingId(null);
+    }
+  }
+
+  /** جزئیات یک لید (تحلیل + تایم‌لاین) */
+  const loadDetail = useCallback(async (leadId: string) => {
+    try {
+      const d = await api<LeadDetail>(`/api/leads/${leadId}`);
+      setDetails((prev) => ({ ...prev, [leadId]: d }));
+    } catch {
+      /* جزئیات اختیاری است — سکوت */
+    }
+  }, []);
+
+  function togglePanel(leadId: string) {
+    if (openId === leadId) {
+      setOpenId(null);
+      triggerRefs.current[leadId]?.focus(); // بازگرداندن فوکوس
+      return;
+    }
+    setOpenId(leadId);
+    if (!details[leadId]) void loadDetail(leadId);
+  }
+
   async function addManualLead(e: FormEvent) {
     e.preventDefault();
     setBusy("manual");
@@ -226,10 +470,18 @@ export function Studio() {
 
   return (
     <div className="space-y-10">
+      {/* کانال اعلان کارهای پس‌زمینه (تحلیل) — همیشه رندر می‌شود */}
+      <div role="status" className="sr-only">
+        {taskStatus}
+      </div>
+
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
       <div aria-live="polite" className="space-y-2">
         {error && (
-          <p className="rounded-lg border border-danger/30 bg-danger-soft px-4 py-2 text-sm text-danger">
+          <p
+            role="alert"
+            className="rounded-lg border border-danger/30 bg-danger-soft px-4 py-2 text-sm text-danger"
+          >
             {error}
           </p>
         )}
@@ -480,8 +732,13 @@ export function Studio() {
             {busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-surface-line shadow-card">
-            <table className="w-full min-w-[720px] border-collapse text-right text-sm">
+          <div
+            role="region"
+            aria-label="جدول لیدها"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-surface-line shadow-card"
+          >
+            <table className="w-full min-w-[860px] border-collapse text-start text-sm">
               <caption className="sr-only">فهرست لیدهای کشف‌شده‌ی کمپین</caption>
               <thead className="bg-surface-dim text-xs text-ink-muted">
                 <tr>
@@ -492,38 +749,83 @@ export function Studio() {
                   <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
                   <th scope="col" className="px-4 py-3 font-semibold">امتیاز</th>
                   <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
+                  <th scope="col" className="px-4 py-3 font-semibold">تحلیل</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-line bg-surface">
                 {leads.map((l) => (
-                  <tr key={l.id} className="align-top">
-                    <th scope="row" className="px-4 py-3 text-right font-medium text-ink">
-                      {l.website ? (
-                        <a
-                          href={l.website}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-brand-700 underline decoration-dotted underline-offset-2 hover:text-brand-600"
+                  <Fragment key={l.id}>
+                    <tr className="align-top">
+                      <th scope="row" className="px-4 py-3 text-start font-medium text-ink">
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            triggerRefs.current[l.id] = el;
+                          }}
+                          aria-expanded={openId === l.id}
+                          aria-controls={`lead-panel-${l.id}`}
+                          onClick={() => togglePanel(l.id)}
+                          className="rounded px-1 py-1 text-start text-brand-700 underline decoration-dotted underline-offset-2 hover:text-brand-600"
                         >
                           {l.businessName}
-                        </a>
-                      ) : (
-                        l.businessName
-                      )}
-                    </th>
-                    <td className="px-4 py-3 text-ink-muted">{l.industry ?? "—"}</td>
-                    <td className="px-4 py-3 text-ink-muted">{l.city ?? "—"}</td>
-                    <td className="px-4 py-3 text-ink-muted" dir="ltr">{l.phone ?? "—"}</td>
-                    <td className="px-4 py-3">
-                      <Channels channels={l.contactChannels} />
-                    </td>
-                    <td className="px-4 py-3 text-ink-muted">{l.score ?? "—"}</td>
-                    <td className="px-4 py-3">
-                      <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
-                        {l.status}
-                      </span>
-                    </td>
-                  </tr>
+                        </button>
+                        {l.website && (
+                          <a
+                            href={l.website}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ms-2 inline-block px-1 py-1 text-xs text-ink-muted underline underline-offset-2 hover:text-brand-600"
+                          >
+                            سایت
+                            <span className="sr-only"> {l.businessName} (در تب جدید باز می‌شود)</span>
+                          </a>
+                        )}
+                      </th>
+                      <td className="px-4 py-3 text-ink-muted">{l.industry ?? "—"}</td>
+                      <td className="px-4 py-3 text-ink-muted">{l.city ?? "—"}</td>
+                      <td className="px-4 py-3 text-ink-muted" dir="ltr">{l.phone ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <Channels channels={l.contactChannels} />
+                      </td>
+                      <td className="px-4 py-3 text-ink-muted">
+                        {l.score != null ? <bdi>{fa(l.score)}</bdi> : "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
+                          {LEAD_STATUS_LABELS[l.status]}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          aria-disabled={analyzingId === l.id}
+                          aria-label={`تحلیل لید ${l.businessName}`}
+                          onClick={() => {
+                            if (analyzingId === l.id) return;
+                            void analyze(l);
+                          }}
+                          className={
+                            analyzingId === l.id
+                              ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
+                              : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
+                          }
+                        >
+                          {analyzingId === l.id ? "در حال تحلیل…" : "تحلیل لید"}
+                        </button>
+                      </td>
+                    </tr>
+
+                    {/* پنل جزئیات — همیشه رندر، فقط hidden جابه‌جا می‌شود */}
+                    <tr id={`lead-panel-${l.id}`} hidden={openId !== l.id}>
+                      <td colSpan={8} className="bg-surface-dim px-4 py-5">
+                        <LeadPanel
+                          lead={l}
+                          detail={details[l.id] ?? null}
+                          onClose={() => togglePanel(l.id)}
+                        />
+                      </td>
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>

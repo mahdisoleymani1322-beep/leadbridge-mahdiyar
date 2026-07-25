@@ -46,13 +46,37 @@ export function isConfigured(): boolean {
   return Boolean(process.env.OPENROUTER_API_KEY);
 }
 
-/** مدل پیش‌فرض همه‌ی ایجنت‌ها؛ برای نویسنده می‌توان مدل قوی‌تر جدا تعیین کرد */
+/**
+ * مدل پیش‌فرض همه‌ی ایجنت‌ها — رایگان‌محور (تصمیم مالک: فعلاً همه رایگان).
+ * با تنظیم PIPELINE_MODEL می‌توان به مدل پولی سوییچ کرد، بدون تغییر کد.
+ */
 export function defaultModel(): string {
-  return process.env.PIPELINE_MODEL || "google/gemini-2.5-flash";
+  return process.env.PIPELINE_MODEL || "meta-llama/llama-3.3-70b-instruct:free";
 }
 
 export function writerModel(): string {
   return process.env.WRITER_MODEL || defaultModel();
+}
+
+/**
+ * زنجیره‌ی مدل‌های جایگزین برای rate-limit (429) یا خطای موقت.
+ * مدل‌های رایگان OpenRouter سقف ~۲۰ req/min و ۲۰۰ req/day دارند؛ اگر یکی
+ * پر شد، بعدی امتحان می‌شود تا اجرا نشکند.
+ */
+export function modelFallbacks(): string[] {
+  const fromEnv = process.env.MODEL_FALLBACKS?.split(",").map((s) => s.trim()).filter(Boolean);
+  if (fromEnv?.length) return fromEnv;
+  return [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+  ];
+}
+
+/** آیا این خطا با مدل دیگر قابل جبران است؟ (rate-limit / در دسترس نبودن) */
+function isRetriableModelError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout/i.test(msg);
 }
 
 export type AgentCallOptions = {
@@ -65,20 +89,36 @@ export type AgentCallOptions = {
   maxOutputTokens?: number;
 };
 
-/** اجرای یک ایجنت با خروجی متنی آزاد */
+/**
+ * اجرای یک ایجنت با خروجی متنی آزاد.
+ * اگر مدل اصلی rate-limit/در دسترس نبود، مدل‌های جایگزین امتحان می‌شوند
+ * (گاردریل: هر مدل فقط یک بار؛ خطای غیرقابل‌جبران بلافاصله پرتاب می‌شود).
+ */
 export async function runAgentText(opts: AgentCallOptions): Promise<string> {
   const openrouter = getOpenRouter();
-  const result = await generateText({
-    model: openrouter(opts.model ?? defaultModel()),
-    system: opts.system,
-    prompt: opts.prompt,
-    temperature: opts.temperature ?? 0.7,
-    maxOutputTokens: opts.maxOutputTokens ?? 8000,
-  });
-  if (!result.text.trim()) {
-    throw new Error(`ایجنت «${opts.agent}» متنی تولید نکرد.`);
+  const primary = opts.model ?? defaultModel();
+  const chain = [primary, ...modelFallbacks().filter((m) => m !== primary)];
+
+  let lastError: unknown = null;
+  for (const model of chain) {
+    try {
+      const result = await generateText({
+        model: openrouter(model),
+        system: opts.system,
+        prompt: opts.prompt,
+        temperature: opts.temperature ?? 0.7,
+        maxOutputTokens: opts.maxOutputTokens ?? 2000,
+      });
+      if (result.text.trim()) return result.text;
+      lastError = new Error("پاسخ خالی بود");
+    } catch (err) {
+      lastError = err;
+      // خطای غیرقابل‌جبران (مثل کلید نامعتبر) → همان‌جا متوقف شو
+      if (!isRetriableModelError(err)) break;
+    }
   }
-  return result.text;
+  const msg = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`ایجنت «${opts.agent}» خروجی نداد: ${msg}`);
 }
 
 /** استخراج اولین شیء JSON از متن (مدل‌ها گاهی دور آن توضیح یا ``` می‌گذارند) */
