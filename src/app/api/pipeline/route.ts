@@ -32,19 +32,32 @@ export async function POST(req: NextRequest) {
       return Response.json({ results: [result] });
     }
 
-    // حالت دسته‌ای (سقف کوچک تا در محدودیت مدل رایگان بماند)
+    // حالت دسته‌ای — «تحلیل همه‌ی لیدهای کمپین»، دسته‌دسته.
+    // گاردریل: سقف هر دسته کوچک است تا (الف) در محدودیت روزانه‌ی مدل رایگان
+    // بماند و (ب) از timeout تابع serverless جلوگیری شود. کاربر می‌تواند دوباره
+    // بزند تا بقیه هم تحلیل شوند (remaining در پاسخ برمی‌گردد).
     if (typeof body.campaignId === "string" && body.campaignId) {
-      const limit = Number.isInteger(body.limit) ? Math.min(body.limit, 5) : 3;
-      const leads = await getStore().listLeads({
+      const store = getStore();
+      const batch = Number.isInteger(body.limit) ? Math.min(Math.max(body.limit, 1), 5) : 3;
+
+      // فقط لیدهایی که هنوز تحلیل نشده‌اند (NEW)
+      const pending = await store.listLeads({
         campaignId: body.campaignId,
         status: "NEW",
-        limit,
+        limit: 500,
       });
+      const slice = pending.slice(0, batch);
+
       const results = [];
-      for (const lead of leads) {
+      for (const lead of slice) {
         results.push(await runLeadPipeline(lead.id));
       }
-      return Response.json({ results });
+
+      return Response.json({
+        results,
+        processed: results.length,
+        remaining: Math.max(pending.length - results.length, 0),
+      });
     }
 
     return Response.json({ error: "leadId یا campaignId لازم است." }, { status: 400 });

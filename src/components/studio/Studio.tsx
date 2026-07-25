@@ -255,10 +255,21 @@ export function Studio() {
 
   // تحلیل لید (فاز ۳)
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [remaining, setRemaining] = useState<number | null>(null);
   const [taskStatus, setTaskStatus] = useState(""); // کانال اعلان زنده‌ی جدا
   const [openId, setOpenId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, LeadDetail>>({});
   const triggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopTicker = () => {
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+  };
+  useEffect(() => () => stopTicker(), []);
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
@@ -284,6 +295,8 @@ export function Studio() {
     const q = campaignId ? `?campaignId=${encodeURIComponent(campaignId)}` : "";
     const { leads } = await api<{ leads: Lead[] }>(`/api/leads${q}`);
     setLeads(leads);
+    // شمارنده‌ی «تحلیل‌نشده» از همین داده محاسبه می‌شود (بدون درخواست اضافه)
+    setRemaining(leads.filter((l) => l.status === "NEW").length);
   }, []);
 
   useEffect(() => {
@@ -360,7 +373,7 @@ export function Studio() {
 
   /** اجرای خط تولید تحلیل روی یک لید (ایجنت‌های فاز ۳) */
   async function analyze(lead: Lead) {
-    if (analyzingId) return; // گارد: یکی در یک زمان
+    if (analyzingId || batchRunning) return; // گارد: یکی در یک زمان (rate-limit مدل)
     setAnalyzingId(lead.id);
     setError("");
     setTaskStatus(`تحلیل «${lead.businessName}» شروع شد. این کار ممکن است تا یک دقیقه طول بکشد.`);
@@ -383,6 +396,50 @@ export function Studio() {
       setTaskStatus("");
     } finally {
       setAnalyzingId(null);
+    }
+  }
+
+  /**
+   * تحلیل گروهی لیدهای کمپین — دسته‌دسته (سقف سرور: ۵ لید در هر نوبت).
+   * چون عملیات ۲–۳ دقیقه سکوت دارد، هر ۶۰ ثانیه یک اطمینان‌بخشی اعلام می‌شود.
+   */
+  async function analyzeBatch() {
+    if (batchRunning || analyzingId || !selectedId) return;
+    setBatchRunning(true);
+    setError("");
+    setNotice("");
+    setTaskStatus(
+      "تحلیل گروهی شروع شد. حداکثر ۵ لید در این نوبت پردازش می‌شود و حدود ۲ تا ۳ دقیقه طول می‌کشد. " +
+        "دکمه‌های «تحلیل لید» در جدول تا پایان کار غیرفعال هستند."
+    );
+
+    let ticks = 0;
+    tickRef.current = setInterval(() => {
+      ticks += 1;
+      setTaskStatus(
+        `تحلیل گروهی هنوز در حال اجراست — حدود ${fa(ticks)} دقیقه گذشته. لطفاً صبر کنید.`
+      );
+    }, 60000);
+
+    try {
+      const res = await api<{ processed: number; remaining: number }>("/api/pipeline", {
+        method: "POST",
+        body: JSON.stringify({ campaignId: selectedId, limit: 5 }),
+      });
+      stopTicker(); // پیش از پیام پایانی، تا تیکِ کهنه بعد از «تمام شد» پخش نشود
+      setRemaining(res.remaining);
+      await loadLeads(selectedId);
+      setTaskStatus(
+        `تحلیل گروهی تمام شد. ${fa(res.processed)} لید تحلیل شد. ` +
+          `${fa(res.remaining)} لید باقی مانده. جدول لیدها به‌روزرسانی شد.`
+      );
+    } catch (e) {
+      stopTicker();
+      setError(e instanceof Error ? e.message : String(e));
+      setTaskStatus("");
+    } finally {
+      stopTicker();
+      setBatchRunning(false);
     }
   }
 
@@ -474,6 +531,11 @@ export function Studio() {
       <div role="status" className="sr-only">
         {taskStatus}
       </div>
+
+      {/* توضیح مشترک دلیل غیرفعال‌بودن دکمه‌های ردیف هنگام تحلیل گروهی */}
+      <span id="batch-block-note" className="sr-only">
+        {batchRunning ? "تحلیل گروهی در حال اجراست؛ تا پایان آن این دکمه غیرفعال است." : ""}
+      </span>
 
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
       <div aria-live="polite" className="space-y-2">
@@ -582,15 +644,50 @@ export function Studio() {
           <h2 id="campaigns-heading" className="text-lg font-extrabold text-ink">
             کمپین‌ها ({campaigns.length})
           </h2>
-          <button
-            type="button"
-            onClick={discover}
-            disabled={!selectedId || busy === "discover"}
-            className="rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark disabled:opacity-60"
-          >
-            {busy === "discover" ? "در حال کشف لید…" : "کشف لید برای کمپین انتخابی 🔎"}
-          </button>
+          <div role="group" aria-label="عملیات کمپین انتخابی" className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={discover}
+              aria-disabled={!selectedId || busy === "discover" || batchRunning}
+              onClickCapture={(e) => {
+                if (!selectedId || busy === "discover" || batchRunning) e.preventDefault();
+              }}
+              className={
+                !selectedId || busy === "discover" || batchRunning
+                  ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
+                  : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
+              }
+            >
+              {busy === "discover" ? "در حال کشف لید…" : "کشف لید برای کمپین انتخابی 🔎"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!selectedId || batchRunning || analyzingId) return;
+                void analyzeBatch();
+              }}
+              aria-disabled={!selectedId || batchRunning || analyzingId !== null}
+              aria-describedby="batch-remaining"
+              className={
+                !selectedId || batchRunning || analyzingId
+                  ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
+                  : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
+              }
+            >
+              {batchRunning ? "در حال تحلیل گروهی…" : "تحلیل لیدهای کمپین انتخابی 🧠"}
+            </button>
+          </div>
         </div>
+
+        {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی دکمه خوانده می‌شود */}
+        <p id="batch-remaining" className="mb-4 text-xs text-ink-muted">
+          {!selectedId
+            ? "ابتدا یک کمپین انتخاب کنید."
+            : remaining === null
+              ? "هر بار حداکثر ۵ لید پردازش می‌شود."
+              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. هر بار حداکثر ۵ لید پردازش می‌شود.`}
+        </p>
 
         {campaigns.length === 0 ? (
           <p className="rounded-xl border border-dashed border-surface-line bg-surface-dim p-6 text-center text-sm text-ink-muted">
@@ -798,14 +895,15 @@ export function Studio() {
                       <td className="px-4 py-3">
                         <button
                           type="button"
-                          aria-disabled={analyzingId === l.id}
                           aria-label={`تحلیل لید ${l.businessName}`}
+                          aria-disabled={batchRunning || analyzingId !== null}
+                          aria-describedby={batchRunning ? "batch-block-note" : undefined}
                           onClick={() => {
-                            if (analyzingId === l.id) return;
+                            if (batchRunning || analyzingId) return;
                             void analyze(l);
                           }}
                           className={
-                            analyzingId === l.id
+                            batchRunning || analyzingId !== null
                               ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
                               : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
                           }
