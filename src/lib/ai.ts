@@ -23,7 +23,8 @@ export function getOpenRouter() {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     headers: {
       "HTTP-Referer": "https://mahdiyar.ai",
-      "X-Title": "LeadBridge AI — Mahdiyar",
+      // فقط ASCII: هدرهای HTTP کاراکتر غیر-Latin1 (مثل — یا فارسی) را نمی‌پذیرند
+      "X-Title": "LeadBridge AI - Mahdiyar",
     },
     // محدودکردن reasoning به سطح پایین (همان درسِ فاز ۲):
     // برخی مدل‌ها استدلال اجباری دارند و ممکن است کل بودجه‌ی توکن را صرف آن کنند.
@@ -50,8 +51,13 @@ export function isConfigured(): boolean {
  * مدل پیش‌فرض همه‌ی ایجنت‌ها — رایگان‌محور (تصمیم مالک: فعلاً همه رایگان).
  * با تنظیم PIPELINE_MODEL می‌توان به مدل پولی سوییچ کرد، بدون تغییر کد.
  */
+/**
+ * مدل پیش‌فرض: gpt-oss-20b رایگان — با تست واقعی روی لیدهای فارسی انتخاب شد
+ * (فارسی روان، JSON پایدار). مدل‌های دیگر یا JSON نمی‌دادند یا فارسی را با
+ * کلمات انگلیسی/چینی قاطی می‌کردند.
+ */
 export function defaultModel(): string {
-  return process.env.PIPELINE_MODEL || "meta-llama/llama-3.3-70b-instruct:free";
+  return process.env.PIPELINE_MODEL || "openai/gpt-oss-20b:free";
 }
 
 export function writerModel(): string {
@@ -66,10 +72,13 @@ export function writerModel(): string {
 export function modelFallbacks(): string[] {
   const fromEnv = process.env.MODEL_FALLBACKS?.split(",").map((s) => s.trim()).filter(Boolean);
   if (fromEnv?.length) return fromEnv;
+  // فهرست از مدل‌های رایگانِ واقعاً موجود روی OpenRouter (تأییدشده با API).
+  // اگر یکی حذف/پر شد، بعدی امتحان می‌شود.
+  // ترتیب بر اساس تست واقعی: اول آن‌هایی که JSON فارسی سالم دادند.
   return [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "openai/gpt-oss-20b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   ];
 }
 
