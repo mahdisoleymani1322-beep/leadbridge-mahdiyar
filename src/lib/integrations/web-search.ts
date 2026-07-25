@@ -1,6 +1,7 @@
 import "server-only";
 import type { DiscoveredPlace } from "./types";
 import { normalizeHandle } from "./instagram";
+import { WEB_SEARCH } from "@/lib/config";
 
 /**
  * منبع سوم کشف: جست‌وجوی وب با Tavily (رایگان، بدون کارت — کلید از tavily.com).
@@ -119,7 +120,7 @@ async function tavilySearch(query: string, maxResults: number): Promise<unknown[
         body: JSON.stringify({
           api_key: process.env.TAVILY_API_KEY,
           query,
-          search_depth: "basic",
+          search_depth: WEB_SEARCH.searchDepth,
           max_results: maxResults,
         }),
       },
@@ -145,19 +146,24 @@ export async function discoverViaWebSearch(
 ): Promise<DiscoveredPlace[]> {
   if (!isWebSearchConfigured() || queryTerms.length === 0) return [];
 
+  // گاردریل: سقف لیدها = کمینه‌ی (limit خواسته‌شده، سقف پیکربندی)
+  const leadCap = Math.min(limit, WEB_SEARCH.maxLeadsPerRun);
   const out: DiscoveredPlace[] = [];
   const seen = new Set<string>();
-  // چند عبارت اول را با تأکید بر اینستاگرام جست‌وجو می‌کنیم
-  for (const term of queryTerms.slice(0, 4)) {
-    if (out.length >= limit) break;
+
+  // گاردریل مصرف: حداکثر maxSearchesPerRun فراخوان Tavily در هر کشف — بدون توجه
+  // به تعداد عبارت‌های بازار (حتی در حالت «همه‌ی بازارها» با کوئری‌های زیاد).
+  const terms = queryTerms.slice(0, WEB_SEARCH.maxSearchesPerRun);
+  for (const term of terms) {
+    if (out.length >= leadCap) break;
     const query = `${term} ${city} اینستاگرام`;
-    const results = await tavilySearch(query, 8);
+    const results = await tavilySearch(query, WEB_SEARCH.maxResultsPerSearch);
     for (const r of results) {
       const place = resultToPlace(r);
       if (place && !seen.has(place.placeId)) {
         seen.add(place.placeId);
         out.push(place);
-        if (out.length >= limit) break;
+        if (out.length >= leadCap) break;
       }
     }
   }

@@ -107,6 +107,24 @@ export const LIMITS = {
   followUp: 1,
 } as const;
 
+/* ── گاردریل جست‌وجوی وب (Tavily) ──────────────────────────── */
+
+/**
+ * Tavily کوتای رایگان محدودی دارد (~۱۰۰۰ جست‌وجو/ماه). پس در هر «کشف لید»
+ * استفاده می‌شود ولی با سقف‌های سخت تا مصرف بهینه بماند:
+ * - maxSearchesPerRun: حداکثر فراخوان Tavily در هر دکمه‌ی کشف (نه به‌ازای هر عبارت).
+ * - maxResultsPerSearch: نتایج هر فراخوان (کمتر = ارزان‌تر).
+ * - maxLeadsPerRun: سقف لیدهای وب که به نتیجه اضافه می‌شود.
+ * - searchDepth: "basic" (ارزان‌تر و کافی؛ "advanced" گران‌تر است).
+ * تخمین مصرف: هر کشف حداکثر ۳ جست‌وجو → ~۳۳۰ کشف در ماه با پلن رایگان.
+ */
+export const WEB_SEARCH = {
+  maxSearchesPerRun: 3,
+  maxResultsPerSearch: 6,
+  maxLeadsPerRun: 12,
+  searchDepth: "basic" as const,
+} as const;
+
 /* ── امتیازدهی لید (۷ معیار وزنی — نقشه‌راه §11.4) ─────────── */
 
 export const SCORING_WEIGHTS = {
