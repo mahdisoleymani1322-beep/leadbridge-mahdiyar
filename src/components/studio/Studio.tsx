@@ -261,15 +261,6 @@ export function Studio() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, LeadDetail>>({});
   const triggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const stopTicker = () => {
-    if (tickRef.current) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-  };
-  useEffect(() => () => stopTicker(), []);
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
@@ -400,45 +391,63 @@ export function Studio() {
   }
 
   /**
-   * تحلیل گروهی لیدهای کمپین — دسته‌دسته (سقف سرور: ۵ لید در هر نوبت).
-   * چون عملیات ۲–۳ دقیقه سکوت دارد، هر ۶۰ ثانیه یک اطمینان‌بخشی اعلام می‌شود.
+   * تحلیل گروهی لیدهای کمپین.
+   *
+   * هر درخواست فقط **یک** لید را پردازش می‌کند (هر لید ~۳۰ ثانیه؛ سقف زمان تابع
+   * روی Vercel رایگان ۶۰ ثانیه است — چند لید در یک درخواست یعنی خطای 504).
+   * کلاینت این درخواست‌ها را پشت‌سرهم می‌فرستد و پس از هر لید پیشرفت واقعی را
+   * اعلام می‌کند. سقف هر نوبت BATCH_PER_CLICK است تا کاربر کنترل داشته باشد و
+   * سهمیه‌ی روزانه‌ی مدل رایگان یک‌جا مصرف نشود.
    */
   async function analyzeBatch() {
     if (batchRunning || analyzingId || !selectedId) return;
+    const BATCH_PER_CLICK = 5;
+
     setBatchRunning(true);
     setError("");
     setNotice("");
     setTaskStatus(
-      "تحلیل گروهی شروع شد. حداکثر ۵ لید در این نوبت پردازش می‌شود و حدود ۲ تا ۳ دقیقه طول می‌کشد. " +
+      `تحلیل گروهی شروع شد. تا ${fa(BATCH_PER_CLICK)} لید در این نوبت پردازش می‌شود؛ هر لید حدود نیم دقیقه. ` +
         "دکمه‌های «تحلیل لید» در جدول تا پایان کار غیرفعال هستند."
     );
 
-    let ticks = 0;
-    tickRef.current = setInterval(() => {
-      ticks += 1;
-      setTaskStatus(
-        `تحلیل گروهی هنوز در حال اجراست — حدود ${fa(ticks)} دقیقه گذشته. لطفاً صبر کنید.`
-      );
-    }, 60000);
-
+    let done = 0;
+    let left: number | null = null;
     try {
-      const res = await api<{ processed: number; remaining: number }>("/api/pipeline", {
-        method: "POST",
-        body: JSON.stringify({ campaignId: selectedId, limit: 5 }),
-      });
-      stopTicker(); // پیش از پیام پایانی، تا تیکِ کهنه بعد از «تمام شد» پخش نشود
-      setRemaining(res.remaining);
+      for (let i = 0; i < BATCH_PER_CLICK; i++) {
+        const res = await api<{ processed: number; remaining: number }>("/api/pipeline", {
+          method: "POST",
+          body: JSON.stringify({ campaignId: selectedId }),
+        });
+        if (res.processed === 0) {
+          left = 0;
+          break; // چیزی برای تحلیل نمانده
+        }
+        done += res.processed;
+        left = res.remaining;
+        setRemaining(res.remaining);
+        // پیشرفت واقعی پس از هر لید (~هر ۳۰ ثانیه یک اعلان معنادار)
+        setTaskStatus(
+          `${fa(done)} لید تحلیل شد؛ ${fa(res.remaining)} لید باقی مانده. در حال ادامه…`
+        );
+        if (res.remaining === 0) break;
+      }
+
       await loadLeads(selectedId);
       setTaskStatus(
-        `تحلیل گروهی تمام شد. ${fa(res.processed)} لید تحلیل شد. ` +
-          `${fa(res.remaining)} لید باقی مانده. جدول لیدها به‌روزرسانی شد.`
+        `تحلیل گروهی تمام شد. ${fa(done)} لید تحلیل شد. ` +
+          `${left != null ? fa(left) : "—"} لید باقی مانده. جدول لیدها به‌روزرسانی شد.`
       );
     } catch (e) {
-      stopTicker();
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(
+        done > 0
+          ? `${fa(done)} لید تحلیل شد، سپس خطا رخ داد: ${msg}`
+          : `تحلیل گروهی ناموفق بود: ${msg}`
+      );
       setTaskStatus("");
+      if (done > 0) await loadLeads(selectedId).catch(() => {});
     } finally {
-      stopTicker();
       setBatchRunning(false);
     }
   }
@@ -685,8 +694,8 @@ export function Studio() {
           {!selectedId
             ? "ابتدا یک کمپین انتخاب کنید."
             : remaining === null
-              ? "هر بار حداکثر ۵ لید پردازش می‌شود."
-              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. هر بار حداکثر ۵ لید پردازش می‌شود.`}
+              ? "هر بار تا ۵ لید پردازش می‌شود (هر لید حدود نیم دقیقه)."
+              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. هر بار تا ۵ لید پردازش می‌شود (هر لید حدود نیم دقیقه).`}
         </p>
 
         {campaigns.length === 0 ? (

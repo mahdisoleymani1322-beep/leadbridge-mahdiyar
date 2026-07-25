@@ -32,31 +32,29 @@ export async function POST(req: NextRequest) {
       return Response.json({ results: [result] });
     }
 
-    // حالت دسته‌ای — «تحلیل همه‌ی لیدهای کمپین»، دسته‌دسته.
-    // گاردریل: سقف هر دسته کوچک است تا (الف) در محدودیت روزانه‌ی مدل رایگان
-    // بماند و (ب) از timeout تابع serverless جلوگیری شود. کاربر می‌تواند دوباره
-    // بزند تا بقیه هم تحلیل شوند (remaining در پاسخ برمی‌گردد).
+    // حالت کمپین — یک لید در هر درخواست پردازش می‌شود.
+    //
+    // چرا فقط یکی: هر لید ~۳۰ ثانیه (۳ فراخوان مدل) طول می‌کشد و سقف زمان تابع
+    // روی Vercel رایگان ۶۰ ثانیه است. پردازش چند لید در یک درخواست → خطای 504.
+    // کلاینت این را پشت‌سرهم صدا می‌زند تا هم تایم‌اوت نشود و هم پیشرفت واقعی
+    // نمایش دهد. `remaining` تعداد باقی‌مانده پس از این لید است.
     if (typeof body.campaignId === "string" && body.campaignId) {
       const store = getStore();
-      const batch = Number.isInteger(body.limit) ? Math.min(Math.max(body.limit, 1), 5) : 3;
-
-      // فقط لیدهایی که هنوز تحلیل نشده‌اند (NEW)
       const pending = await store.listLeads({
         campaignId: body.campaignId,
         status: "NEW",
         limit: 500,
       });
-      const slice = pending.slice(0, batch);
 
-      const results = [];
-      for (const lead of slice) {
-        results.push(await runLeadPipeline(lead.id));
+      if (pending.length === 0) {
+        return Response.json({ results: [], processed: 0, remaining: 0 });
       }
 
+      const result = await runLeadPipeline(pending[0].id);
       return Response.json({
-        results,
-        processed: results.length,
-        remaining: Math.max(pending.length - results.length, 0),
+        results: [result],
+        processed: 1,
+        remaining: pending.length - 1,
       });
     }
 
