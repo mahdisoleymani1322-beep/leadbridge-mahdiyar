@@ -7,6 +7,11 @@ import { runLeadAnalysis } from "./lead-analysis";
 import { scoreLead, type ScoreResult } from "./scoring";
 import { runServiceMatch } from "./service-match";
 import { runPortfolioSelect } from "./portfolio-select";
+import { runMessageWriter } from "./message-writer";
+import { runMessageCritic } from "./message-critic";
+import { checkPolicy } from "./policy-guard";
+import { CRITIC_THRESHOLDS, MAX_REVISION_ROUNDS } from "@/lib/config";
+import type { Message } from "@/lib/store";
 import type { LeadAnalysisOutput, ServiceMatchOutput, PortfolioSelectOutput } from "./types";
 
 /**
@@ -50,7 +55,7 @@ export type PipelineResult = {
 export type StepResult = {
   leadId: string;
   /** گامی که همین حالا اجرا شد */
-  ran: "analysis" | "service-match" | "portfolio-select" | "none";
+  ran: "analysis" | "service-match" | "portfolio-select" | "message" | "none";
   status: LeadStatus;
   score: number | null;
   /** آیا این لید کارش تمام شده؟ (دیگر گامی نمانده) */
@@ -186,8 +191,114 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
       ran: "portfolio-select",
       status: "READY_FOR_MESSAGE",
       score: lead.score,
-      done: true,
+      done: false, // گام پیام مانده
       summary: "آماده‌ی تولید پیام.",
+    };
+  }
+
+  // ── گام ۴: تولید پیام + نقد + Policy Guard (فاز ۴) ──
+  if (lead.status === "READY_FOR_MESSAGE") {
+    const existingMsgs = await store.listMessages({ leadId });
+    if (existingMsgs.length > 0) {
+      return { leadId, ran: "none", status: lead.status, score: lead.score, done: true, summary: "پیام قبلاً ساخته شده." };
+    }
+
+    const analysisInput: LeadAnalysisOutput = {
+      businessSummary: existing.businessSummary,
+      targetCustomer: existing.targetCustomer,
+      painPoint: existing.painPoint,
+      needSignals: existing.needSignals,
+      evidence: existing.evidence,
+      uncertainties: existing.uncertainties,
+      brandTone: existing.brandTone,
+      riskFlags: existing.riskFlags,
+      confidence: existing.confidence,
+    };
+    const hasEmail = Boolean(lead.contactChannels.email);
+
+    // نمونه‌کارهای پیشنهادی از خروجی گام قبلی (portfolio-select) خوانده می‌شوند
+    const runs = await store.listAgentRuns(leadId, 20);
+    const portfolioRun = runs.find((r) => r.agentName === "portfolio-select" && r.status === "done");
+    const recommendedPortfolioIds: string[] =
+      (portfolioRun?.output as { selectedIds?: string[] } | null)?.selectedIds ?? [];
+
+    // حلقه‌ی نویسنده ⇄ منتقد — حداکثر MAX_REVISION_ROUNDS دور (گاردریل §23)
+    let draft = await runMessageWriter({
+      businessName: lead.businessName,
+      industry: lead.industry,
+      city: lead.city,
+      analysis: analysisInput,
+      serviceId: existing.recommendedService,
+      channel: lead.preferredChannel,
+      hasEmail,
+    });
+    let critic = await runMessageCritic({
+      message: draft.message,
+      businessName: lead.businessName,
+      analysis: analysisInput,
+      serviceId: existing.recommendedService,
+    });
+
+    let rounds = 0;
+    while (critic.score < CRITIC_THRESHOLDS.pass && rounds < MAX_REVISION_ROUNDS) {
+      rounds++;
+      draft = await runMessageWriter({
+        businessName: lead.businessName,
+        industry: lead.industry,
+        city: lead.city,
+        analysis: analysisInput,
+        serviceId: existing.recommendedService,
+        channel: lead.preferredChannel,
+        hasEmail,
+        revision: { previousMessage: draft.message, instructions: critic.revisionInstructions },
+      });
+      critic = await runMessageCritic({
+        message: draft.message,
+        businessName: lead.businessName,
+        analysis: analysisInput,
+        serviceId: existing.recommendedService,
+      });
+    }
+
+    // Policy Guard قطعی — علاوه بر قضاوت مدل (صفر توکن)
+    const policy = checkPolicy(draft.message, { businessName: lead.businessName });
+
+    const msg: Message = {
+      id: randomUUID(),
+      leadId,
+      targetChannel: lead.preferredChannel,
+      draftText: draft.message,
+      finalText: null,
+      emailSubject: draft.emailSubject,
+      emailText: draft.emailBody,
+      status: "draft", // همیشه پیش‌نویس — ارسال فقط با تأیید انسانی
+      criticScore: critic.score,
+      painTargeted: draft.painTargeted,
+      recommendedPortfolioIds,
+      approvedBy: null,
+      sentAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    await store.createMessage(msg);
+
+    const needsHuman = critic.score < CRITIC_THRESHOLDS.pass || policy.verdict !== "PASS";
+    await store.updateLead(leadId, { status: needsHuman ? "MESSAGE_REVIEW" : "MESSAGE_DRAFTED" });
+
+    await logRun(
+      "message-writer",
+      "done",
+      `پیام ساخته شد — نمره‌ی منتقد ${critic.score}${rounds ? ` (${rounds} بازنویسی)` : ""}` +
+        (policy.verdict !== "PASS" ? ` · Policy: ${policy.verdict}` : ""),
+      { draft, critic, policy, rounds }
+    );
+
+    return {
+      leadId,
+      ran: "message",
+      status: needsHuman ? "MESSAGE_REVIEW" : "MESSAGE_DRAFTED",
+      score: lead.score,
+      done: true,
+      summary: `پیش‌نویس پیام آماده شد (نمره ${critic.score}).`,
     };
   }
 

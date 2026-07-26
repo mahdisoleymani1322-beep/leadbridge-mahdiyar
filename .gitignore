@@ -24,3 +24,8 @@ next-env.d.ts
 *.log
 
 .vercel
+
+# فایل‌های موقت تست
+*.json.tmp
+tscout.txt
+pick*.txt
