@@ -65,26 +65,35 @@ export async function POST(req: NextRequest) {
         const all = await store.listLeads({ campaignId: body.campaignId, limit: 1000 });
         const names = all.map((l) => l.businessName);
 
-        let scored = 0;
-        // نمره‌ی هر لید بعد از این حلقه: موجود یا تازه‌محاسبه‌شده
+        /*
+          **همیشه از نو محاسبه می‌شود، نه فقط لیدهای بدون نمره.**
+
+          نسخه‌ی اول این کد شرط `affluenceScore == null` داشت و یک باگ واقعی
+          ساخت: لیدهایی که با الگوریتم قدیمی نمره گرفته بودند نمره‌ی بیات‌شان
+          را برای همیشه نگه می‌داشتند. نمونه‌ی واقعی: یک کلینیک با ۶ کانال
+          ارتباط روی ۴۵ (نمره‌ی الگوریتم قدیم) مانده بود، در حالی که با
+          الگوریتم فعلی ۶۰ می‌گیرد.
+
+          محاسبه‌ی دوباره بی‌خطر است: scoreAffluence یک تابع خالص روی داده‌ی
+          ذخیره‌شده است — صفر توکن و idempotent.
+        */
+        let changed = 0;
         const finalScores: number[] = [];
         for (const l of all) {
-          if (l.affluenceScore == null) {
-            const aff = scoreAffluence(l, { siblingNames: names });
+          const aff = scoreAffluence(l, { siblingNames: names });
+          if (aff.score !== l.affluenceScore) {
             await store.updateLead(l.id, {
               affluenceScore: aff.score,
               affluenceSignals: aff.signals,
             });
-            finalScores.push(aff.score);
-            scored++;
-          } else {
-            finalScores.push(l.affluenceScore);
+            changed++;
           }
+          finalScores.push(aff.score);
         }
 
         return Response.json({
           only: "affluence",
-          scored, // چند لید تازه نمره گرفت
+          changed, // چند لید نمره‌اش عوض شد
           total: all.length,
           worthAnalyzing: finalScores.filter((s) => s >= AFFLUENCE_THRESHOLDS.analyze).length,
           threshold: AFFLUENCE_THRESHOLDS.analyze,

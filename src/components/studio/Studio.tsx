@@ -773,7 +773,7 @@ export function Studio() {
     setTaskStatus("محاسبه‌ی توان مالی شروع شد. این کار هیچ توکنی مصرف نمی‌کند.");
     try {
       const res = await api<{
-        scored: number;
+        changed: number;
         total: number;
         worthAnalyzing: number;
         threshold: number;
@@ -783,8 +783,8 @@ export function Studio() {
       });
       await loadLeads(selectedId);
       const msg =
-        `توان مالی محاسبه شد: ${fa(res.scored)} لید نمره‌ی تازه گرفت. ` +
-        `از ${fa(res.total)} لید، ${fa(res.worthAnalyzing)} تا نمره‌ی ${fa(res.threshold)} یا بالاتر دارند و ارزش تحلیل دارند؛ ` +
+        `توان مالی هر ${fa(res.total)} لید از نو محاسبه شد (${fa(res.changed)} نمره عوض شد). ` +
+        `${fa(res.worthAnalyzing)} لید نمره‌ی ${fa(res.threshold)} یا بالاتر دارند و ارزش تحلیل دارند؛ ` +
         `${fa(res.total - res.worthAnalyzing)} تا کم‌ارزش‌اند و تحلیل گروهی سراغشان نمی‌رود.`;
       setNotice(msg);
       setTaskStatus(msg);

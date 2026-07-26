@@ -113,12 +113,17 @@ export async function runLeadStep(
   // چرا اینجا و نه بعد از تحلیل: هر لید ضعیفی که تحلیل شود یک فراخوان از
   // سهمیه‌ی ۵۰ درخواستِ روزانه را می‌سوزاند. غربال رایگان اول، خرج توکن بعد.
   if (!existing) {
-    if (lead.affluenceScore == null) {
+    // همیشه از نو محاسبه می‌شود، نه فقط وقتی null است: نمره‌ی ذخیره‌شده ممکن
+    // است مال نسخه‌ی قبلی الگوریتم باشد و تصمیمِ دروازه را با داده‌ی بیات بگیرد.
+    // تابع خالص است، پس محاسبه‌ی دوباره صفر توکن و بی‌خطر است.
+    {
       const aff = scoreAffluence(lead);
-      await store.updateLead(leadId, {
-        affluenceScore: aff.score,
-        affluenceSignals: aff.signals,
-      });
+      if (aff.score !== lead.affluenceScore) {
+        await store.updateLead(leadId, {
+          affluenceScore: aff.score,
+          affluenceSignals: aff.signals,
+        });
+      }
       lead.affluenceScore = aff.score;
       lead.affluenceSignals = aff.signals;
     }
@@ -144,6 +149,7 @@ export async function runLeadStep(
 
   // ── گام ۱: تحلیل + امتیازدهی (اگر هنوز تحلیل نشده) ──
   if (!existing) {
+    const statusBefore = lead.status;
     await store.updateLead(leadId, { status: "ANALYZING" });
     const igProfile =
       isInstagramConfigured() && lead.instagramHandle
@@ -161,7 +167,26 @@ export async function runLeadStep(
       lead.affluenceSignals = aff.signals;
     }
 
-    const analysis = await runLeadAnalysis({ lead, igProfile });
+    /*
+      ANALYZING یک وضعیت گذرا است و در صف کمپین دیده نمی‌شود (صف فقط NEW،
+      SCORED و READY_FOR_MESSAGE را برمی‌دارد). پس اگر ایجنت خطا بدهد —
+      مثلاً سهمیه‌ی روزانه‌ی مدل تمام شود — لید **برای همیشه** در ANALYZING
+      گیر می‌کند و هیچ‌وقت دوباره برداشته نمی‌شود. سه لید واقعی همین‌طور
+      گیر کرده بودند. پس وضعیت قبلی را برمی‌گردانیم و خطا را بالا می‌دهیم.
+    */
+    let analysis: Awaited<ReturnType<typeof runLeadAnalysis>>;
+    try {
+      analysis = await runLeadAnalysis({ lead, igProfile });
+    } catch (err) {
+      await store.updateLead(leadId, { status: statusBefore });
+      await logRun(
+        "lead-analysis",
+        "error",
+        `تحلیل ناموفق — وضعیت به ${statusBefore} برگردانده شد تا لید در صف بماند.`,
+        { error: err instanceof Error ? err.message : String(err) }
+      );
+      throw err;
+    }
     await store.upsertAnalysis({
       id: randomUUID(),
       leadId,
