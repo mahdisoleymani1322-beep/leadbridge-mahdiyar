@@ -81,6 +81,17 @@ export async function POST(req: NextRequest) {
       // دکمه‌ی تحلیل گروهی تداخل نکند و سهمیه‌ی مدل صرف تحلیل نشود.
       const onlyMessage = body.only === "message";
 
+      /*
+        دامنه‌ی کار: «منتخب» یا کل کمپین.
+
+        هر دو دکمه‌ی گروهی داشبورد فقط روی فهرست منتخب کار می‌کنند — جریان کار
+        مالک این است: انتخاب دستی → منتخب → تحلیل همه → پیام همه. مسیر
+        کل‌کمپین برای کرون روزانه (فاز ۶) دست‌نخورده می‌ماند.
+      */
+      const shortlistOnly = body.scope === "shortlist";
+      const pickScope = (rows: Awaited<ReturnType<typeof store.listLeads>>) =>
+        shortlistOnly ? rows.filter((l) => l.shortlisted) : rows;
+
       // حالت «فقط توان مالی» — **صفر توکن**. برای همه‌ی لیدهایی که نمره ندارند
       // (لیدهای دستی یا قدیمی) یک‌جا محاسبه می‌کند تا پیش از خرج هر توکنی
       // بدانی کدام لیدها ارزش تحلیل دارند. یک درخواست، بدون فراخوان مدل.
@@ -125,15 +136,18 @@ export async function POST(req: NextRequest) {
       }
 
       if (onlyMessage) {
-        const waiting = await store.listLeads({
-          campaignId: body.campaignId,
-          status: "READY_FOR_MESSAGE",
-          limit: 500,
-        });
+        const waiting = pickScope(
+          await store.listLeads({
+            campaignId: body.campaignId,
+            status: "READY_FOR_MESSAGE",
+            limit: 500,
+          })
+        );
         const target = waiting[0];
         if (!target) return Response.json({ step: null, remaining: 0, done: true });
 
-        const step = await runLeadStep(target.id);
+        // force در دامنه‌ی منتخب: انتخاب دستی انسان خودش اراده‌ی صریح است
+        const step = await runLeadStep(target.id, { force: shortlistOnly });
         return Response.json({
           step,
           businessName: target.businessName,
@@ -147,23 +161,21 @@ export async function POST(req: NextRequest) {
       //   SCORED            → گام خدمت/نمونه‌کار مانده
       //   READY_FOR_MESSAGE → گام تولید پیام مانده (فاز ۴)
       // بعد سراغ لید تحلیل‌نشده‌ی بعدی می‌رویم.
-      const scored = await store.listLeads({
-        campaignId: body.campaignId,
-        status: "SCORED",
-        limit: 1,
-      });
+      const scored = pickScope(
+        await store.listLeads({ campaignId: body.campaignId, status: "SCORED", limit: 500 })
+      ).slice(0, 1);
       const readyForMessage = scored.length
         ? []
-        : await store.listLeads({
-            campaignId: body.campaignId,
-            status: "READY_FOR_MESSAGE",
-            limit: 1,
-          });
-      const freshRaw = await store.listLeads({
-        campaignId: body.campaignId,
-        status: "NEW",
-        limit: 500,
-      });
+        : pickScope(
+            await store.listLeads({
+              campaignId: body.campaignId,
+              status: "READY_FOR_MESSAGE",
+              limit: 500,
+            })
+          ).slice(0, 1);
+      const freshRaw = pickScope(
+        await store.listLeads({ campaignId: body.campaignId, status: "NEW", limit: 500 })
+      );
 
       // **مهم‌ترین بخش صرفه‌جویی:** لیدها به ترتیب نزولیِ توان مالی پردازش
       // می‌شوند، نه به ترتیب تاریخ. اگر سهمیه‌ی روزانه وسط کار تمام شود،
@@ -175,7 +187,9 @@ export async function POST(req: NextRequest) {
         return Response.json({ step: null, remaining: 0, done: true });
       }
 
-      const step = await runLeadStep(target.id);
+      // force در دامنه‌ی منتخب: لیدی که انسان دستی انتخاب کرده نباید با
+      // دروازه‌ی توان مالی کنار گذاشته شود — انتخاب او خودش اراده‌ی صریح است.
+      const step = await runLeadStep(target.id, { force: shortlistOnly });
       // «باقی‌مانده» = لیدهایی که هنوز تحلیل نشده‌اند (برای نمایش پیشرفت).
       // دروازه‌ی توان مالی هم لید را از صف NEW خارج می‌کند، پس آن هم می‌شمارد.
       const consumed = step.ran === "analysis" || step.ran === "affluence-gate";

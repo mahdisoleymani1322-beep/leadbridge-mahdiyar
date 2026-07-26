@@ -1090,8 +1090,8 @@ export function Studio() {
     setError("");
     setNotice("");
     setTaskStatus(
-      "تحلیل گروهی شروع شد. لیدها یکی‌یکی و پشت‌سرهم تحلیل می‌شوند تا همه تمام شوند. " +
-        "دکمه‌های «تحلیل لید» و «تولید پیام» در جدول تا پایان کار غیرفعال هستند."
+      "تحلیل فهرست منتخب شروع شد. لیدهای منتخب یکی‌یکی و پشت‌سرهم تحلیل می‌شوند تا همه تمام شوند. " +
+        "دکمه‌های «تحلیل لید» و «تولید پیام» در جدول‌ها تا پایان کار غیرفعال هستند."
     );
 
     let analyzed = 0; // تعداد لیدهایی که تحلیلشان کامل شد
@@ -1107,7 +1107,7 @@ export function Studio() {
           done: boolean;
         }>("/api/pipeline", {
           method: "POST",
-          body: JSON.stringify({ campaignId: selectedId }),
+          body: JSON.stringify({ campaignId: selectedId, scope: "shortlist" }),
         });
 
         if (res.done || !res.step) break; // چیزی برای پردازش نمانده
@@ -1156,7 +1156,7 @@ export function Studio() {
       await loadLeads(selectedId);
       await loadMessages(selectedId).catch(() => {});
       setTaskStatus(
-        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. ` +
+        `تحلیل فهرست منتخب تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. ` +
           (skipped > 0
             ? `${fa(skipped)} لید کم‌ارزش بدون مصرف توکن کنار گذاشته شد. `
             : "") +
@@ -1167,7 +1167,7 @@ export function Studio() {
       setError(
         analyzed > 0
           ? `${fa(analyzed)} لید تحلیل شد، سپس خطا رخ داد: ${msg} — می‌توانید دوباره دکمه را بزنید تا ادامه دهد.`
-          : `تحلیل گروهی ناموفق بود: ${msg}`
+          : `تحلیل فهرست منتخب ناموفق بود: ${msg}`
       );
       setTaskStatus("");
       await loadLeads(selectedId).catch(() => {});
@@ -1225,7 +1225,7 @@ export function Studio() {
     setMsgGenRunning(true);
     setError("");
     setNotice("");
-    setTaskStatus("تولید پیام گروهی شروع شد. لیدها یکی‌یکی و پشت‌سرهم پیام می‌گیرند تا همه تمام شوند.");
+    setTaskStatus("تولید پیام برای فهرست منتخب شروع شد. لیدها یکی‌یکی و پشت‌سرهم پیام می‌گیرند تا همه تمام شوند.");
 
     let made = 0;
     try {
@@ -1237,7 +1237,7 @@ export function Studio() {
           done: boolean;
         }>("/api/pipeline", {
           method: "POST",
-          body: JSON.stringify({ campaignId: selectedId, only: "message" }),
+          body: JSON.stringify({ campaignId: selectedId, only: "message", scope: "shortlist" }),
         });
 
         if (res.done || !res.step) break;
@@ -1256,13 +1256,13 @@ export function Studio() {
 
       await loadLeads(selectedId);
       await loadMessages(selectedId);
-      setTaskStatus(`تولید پیام گروهی تمام شد. ${fa(made)} پیام آماده‌ی تأیید است.`);
+      setTaskStatus(`تولید پیام فهرست منتخب تمام شد. ${fa(made)} پیام آماده‌ی تأیید است.`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(
         made > 0
           ? `${fa(made)} پیام ساخته شد، سپس خطا رخ داد: ${msg} — می‌توانی دوباره دکمه را بزنی تا ادامه دهد.`
-          : `تولید پیام گروهی ناموفق بود: ${msg}`
+          : `تولید پیام فهرست منتخب ناموفق بود: ${msg}`
       );
       setTaskStatus("");
       await loadMessages(selectedId).catch(() => {});
@@ -1558,19 +1558,25 @@ export function Studio() {
   const shortlisted = leads.filter((l) => l.shortlisted).sort(byAffluenceDesc);
   const unshortlisted = leads.filter((l) => !l.shortlisted).sort(byAffluenceDesc);
 
-  /**
-   * لیدهای تحلیل‌نشده‌ای که نمره‌ی توان مالی‌شان کافی است.
-   * آستانه از config می‌آید تا با سرور یکی باشد.
-   */
-  const worthAnalyzingCount = leads.filter(
-    (l) => l.status === "NEW" && (l.affluenceScore ?? 0) >= AFFLUENCE_THRESHOLDS.analyze
-  ).length;
+  /*
+    شمارنده‌های دکمه‌های گروهی — همه بر اساس **فهرست منتخب**، نه کل کمپین.
+    جریان کار: انتخاب دستی → منتخب → تحلیل همه → پیام همه.
+  */
 
-  /** لیدهای آماده‌ی پیام در کمپین انتخابی */
-  const readyForMessageCount = leads.filter(canMessage).length;
-  /** آیا هنوز لید تحلیل‌نشده‌ای مانده؟ (شرط فعال‌شدن دکمه‌ی گروهی) */
-  const unanalyzedCount = leads.filter((l) => l.status === "NEW" || l.status === "SCORED").length;
-  const canGenerateAll = readyForMessageCount > 0 && unanalyzedCount === 0;
+  /** لیدهای منتخبی که هنوز تحلیل نشده‌اند */
+  const shortUnanalyzed = shortlisted.filter(
+    (l) => l.status === "NEW" || l.status === "LOW_VALUE" || l.status === "SCORED"
+  ).length;
+  /** لیدهای منتخب آماده‌ی پیام */
+  const shortReadyForMessage = shortlisted.filter(canMessage).length;
+
+  /** تحلیل گروهی وقتی معنا دارد که دست‌کم یک لید منتخبِ تحلیل‌نشده باشد */
+  const canAnalyzeShortlist = shortUnanalyzed > 0;
+  /**
+   * پیام گروهی فقط وقتی که **همه‌ی** منتخب‌ها تحلیل شده‌اند و دست‌کم یکی
+   * آماده‌ی پیام است — تا نصفه‌کاره شروع نشود.
+   */
+  const canGenerateAll = shortReadyForMessage > 0 && shortUnanalyzed === 0;
 
   const visibleMessages = msgFilter === "all" ? messages : messages.filter((m) => m.status === msgFilter);
   const blockedCount = messages.filter((m) => m.policy.verdict === "BLOCK").length;
@@ -1608,8 +1614,11 @@ export function Studio() {
         این دکمه وقتی فعال می‌شود که در جدول «فهرست منتخب» دست‌کم یک لید را تیک زده باشید.
       </span>
       <span id="msg-all-gate-note" className="sr-only">
-        این دکمه وقتی فعال می‌شود که همه‌ی لیدهای کمپین تحلیل و امتیازدهی شده باشند و دست‌کم یک لید
-        در وضعیت «آماده‌ی پیام» باشد.
+        این دکمه وقتی فعال می‌شود که همه‌ی لیدهای فهرست منتخب تحلیل و امتیازدهی شده باشند و دست‌کم
+        یک لید در وضعیت «آماده‌ی پیام» باشد.
+      </span>
+      <span id="analyze-all-gate-note" className="sr-only">
+        این دکمه وقتی فعال می‌شود که در فهرست منتخب دست‌کم یک لید تحلیل‌نشده باشد.
       </span>
 
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
@@ -1760,37 +1769,14 @@ export function Studio() {
               {busy === "affluence" ? "در حال محاسبه…" : "محاسبه‌ی توان مالی (رایگان)"}
             </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                if (!selectedId || busyAny) return;
-                void analyzeBatch();
-              }}
-              aria-disabled={!selectedId || busyAny}
-              aria-describedby="batch-remaining"
-              className={
-                !selectedId || busyAny
-                  ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
-                  : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
-              }
-            >
-              {batchRunning ? "در حال تحلیل گروهی…" : "تحلیل لیدهای کمپین انتخابی 🧠"}
-            </button>
           </div>
         </div>
 
         {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی دکمه خوانده می‌شود */}
-        <p id="affluence-note" className="mb-1 text-xs leading-6 text-ink-muted">
-          محاسبه‌ی توان مالی هیچ توکنی مصرف نمی‌کند. اول این را بزن: بعدش می‌بینی کدام لیدها ارزش
-          خرج توکن دارند. تحلیل گروهی هم لیدها را از ارزشمندترین شروع می‌کند و لیدهای زیر آستانه را
-          کنار می‌گذارد (بدون پاک‌کردن — با دکمه‌ی «تحلیل لید» همان ردیف می‌توانی دستی تحلیلشان کنی).
-        </p>
-        <p id="batch-remaining" className="mb-4 text-xs text-ink-muted">
-          {!selectedId
-            ? "ابتدا یک کمپین انتخاب کنید."
-            : remaining === null
-              ? "لیدها از ارزشمندترین به کم‌ارزش‌ترین یکی‌یکی تحلیل می‌شوند (هر لید حدود نیم دقیقه)."
-              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده — از این تعداد ${fa(worthAnalyzingCount)} تا نمره‌ی توان مالی کافی دارند. تحلیل از ارزشمندترین شروع می‌شود.`}
+        <p id="affluence-note" className="mb-4 text-xs leading-6 text-ink-muted">
+          محاسبه‌ی توان مالی هیچ توکنی مصرف نمی‌کند و روی همه‌ی لیدهای کمپین کار می‌کند. اول این را
+          بزن تا ببینی کدام لیدها ارزش خرج توکن دارند؛ بعد در جدول پایین تیکشان بزن و به «فهرست
+          منتخب» بفرست. تحلیل و تولید پیام فقط آنجا انجام می‌شود.
         </p>
 
         {campaigns.length === 0 ? (
@@ -2017,6 +2003,73 @@ export function Studio() {
               : `برگرداندن ${fa(shortSelectedIds.size)} لید به فهرست اصلی`}
           </button>
         </div>
+
+        {/*
+          دو کار گروهی — به‌ترتیبِ همان جریان کار: اول تحلیل، بعد پیام.
+          هر دو فقط روی فهرست منتخب کار می‌کنند، نه کل کمپین.
+        */}
+        <div role="group" aria-label="عملیات گروهی فهرست منتخب" className="mb-3 flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (busyAny || !canAnalyzeShortlist) return;
+              void analyzeBatch();
+            }}
+            aria-disabled={busyAny || !canAnalyzeShortlist}
+            aria-describedby={
+              canAnalyzeShortlist ? "shortlist-batch-note" : "shortlist-batch-note analyze-all-gate-note"
+            }
+            className={
+              busyAny || !canAnalyzeShortlist
+                ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
+            }
+          >
+            {batchRunning ? (
+              "در حال تحلیل منتخب‌ها…"
+            ) : (
+              <>
+                تحلیل همه‌ی لیدهای منتخب <span aria-hidden="true">🧠</span>
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (busyAny || !canGenerateAll) return;
+              void generateAllMessages();
+            }}
+            aria-disabled={busyAny || !canGenerateAll}
+            aria-describedby={
+              canGenerateAll ? "shortlist-batch-note" : "shortlist-batch-note msg-all-gate-note"
+            }
+            className={
+              busyAny || !canGenerateAll
+                ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
+            }
+          >
+            {msgGenRunning ? (
+              "در حال تولید پیام‌ها…"
+            ) : (
+              <>
+                تولید پیام برای همه‌ی لیدهای منتخب <span aria-hidden="true">✍️</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی هر دو دکمه */}
+        <p id="shortlist-batch-note" className="mb-4 text-xs leading-6 text-ink-muted">
+          {shortlisted.length === 0
+            ? "فهرست منتخب خالی است. از جدول بالا لید تیک بزن و به اینجا بفرست."
+            : shortUnanalyzed > 0
+              ? `${fa(shortUnanalyzed)} لید منتخب هنوز تحلیل نشده است. اول «تحلیل همه‌ی لیدهای منتخب» را بزن؛ ` +
+                `بعد از تمام‌شدنش دکمه‌ی تولید پیام فعال می‌شود.`
+              : `همه‌ی ${fa(shortlisted.length)} لید منتخب تحلیل شده‌اند و ${fa(shortReadyForMessage)} تا آماده‌ی پیام‌اند. ` +
+                `با یک بار زدن، برای همه یکی‌یکی پیام ساخته می‌شود.`}
+        </p>
         <p className="mb-4 text-xs leading-6 text-ink-muted">
           اینجا هر لید را جدا تحلیل کن و بعد پیامش را بساز. دکمه‌ی «تولید پیام» تا وقتی لید تحلیل و
           امتیازدهی نشده باشد کار نمی‌کند — سرور هم جلویش را می‌گیرد، نه فقط این صفحه.
@@ -2047,45 +2100,9 @@ export function Studio() {
 
       {/* ── پیام‌ها (تأیید انسانی — فاز ۴) ── */}
       <section aria-labelledby="messages-heading">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="messages-heading" className="text-lg font-extrabold text-ink">
-            پیام‌ها ({fa(messages.length)})
-          </h2>
-          <button
-            type="button"
-            onClick={() => {
-              if (busyAny || !canGenerateAll) return;
-              void generateAllMessages();
-            }}
-            aria-disabled={busyAny || !canGenerateAll}
-            /* شمارنده همیشه بماند: دلیل دقیقِ غیرفعال‌بودن آنجاست، نه در قاعده‌ی کلی */
-            aria-describedby={canGenerateAll ? "msg-all-count" : "msg-all-count msg-all-gate-note"}
-            className={
-              busyAny || !canGenerateAll
-                ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
-                : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
-            }
-          >
-            {msgGenRunning ? (
-              "در حال تولید پیام‌ها…"
-            ) : (
-              <>
-                تولید پیام برای همه‌ی لیدهای کمپین <span aria-hidden="true">✍️</span>
-              </>
-            )}
-          </button>
-        </div>
-
-        {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی دکمه خوانده می‌شود */}
-        <p id="msg-all-count" className="mb-2 text-xs text-ink-muted">
-          {!selectedId
-            ? "ابتدا یک کمپین انتخاب کنید."
-            : unanalyzedCount > 0
-              ? `${fa(unanalyzedCount)} لید هنوز تحلیل نشده است. اول «تحلیل لیدهای کمپین انتخابی» را کامل کن، بعد این دکمه فعال می‌شود.`
-              : readyForMessageCount > 0
-                ? `${fa(readyForMessageCount)} لید آماده‌ی پیام است. با یک بار زدن، برای همه یکی‌یکی پیام ساخته می‌شود.`
-                : "لید آماده‌ی پیامی نیست. فقط لیدهایی که امتیاز ۷۰ به بالا گرفته‌اند پیام می‌گیرند."}
-        </p>
+        <h2 id="messages-heading" className="mb-2 text-lg font-extrabold text-ink">
+          پیام‌ها ({fa(messages.length)})
+        </h2>
 
         {/* خلاصه‌ی ماندگار — نه اعلان زنده؛ همیشه قابل‌مرور با screen reader */}
         <p className="mb-4 text-xs leading-6 text-ink-muted">
