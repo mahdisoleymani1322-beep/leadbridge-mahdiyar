@@ -16,6 +16,19 @@ export type Market = {
   priority: number;
   /** عبارت‌های جست‌وجو برای Google Places Text Search */
   queryTerms: string[];
+  /**
+   * عبارت‌های ویژه‌ی «دفتر در شهر هدف» — برای بازارهایی که خودِ کسب‌وکار
+   * ممکن است بیرون شهر باشد ولی دفتر مرکزی/فروش در شهر داشته باشد.
+   *
+   * فقط بازار صنعتی این را دارد: کارخانه‌ی ساوه یا کاشان دفتر تهران دارد و
+   * قرار حضوری همان‌جاست. «دفتر مرکزی کلینیک زیبایی» بی‌معنی است، پس بقیه‌ی
+   * بازارها این فیلد را نمی‌گیرند.
+   *
+   * سمت OSM چیزی لازم نیست: مرز Overpass همان شهر است و `office=company`
+   * از قبل در تگ‌های بازار صنعتی هست — دفتر تهران خودبه‌خود پیدا می‌شود.
+   * شکاف فقط سمت جست‌وجوی وب (Tavily) بود.
+   */
+  officeTerms?: string[];
   /** تگ‌های OpenStreetMap (Overpass) — منبع پیش‌فرض کشف (رایگان، بدون کلید) */
   osmTags: string[];
 };
@@ -26,6 +39,12 @@ export const MARKETS: Market[] = [
     title: "کارخانجات و گروه‌های صنعتی",
     priority: 1, // اولویت بالا: ارزش قرارداد بالاتر، ضعف دیجیتال رایج
     queryTerms: ["کارخانه", "شرکت تولیدی", "مجتمع صنعتی", "گروه صنعتی"],
+    officeTerms: [
+      "دفتر مرکزی کارخانه",
+      "دفتر فروش کارخانه",
+      "دفتر مرکزی گروه صنعتی",
+      "نمایندگی صنایع",
+    ],
     osmTags: ["man_made=works", "office=company", "industrial", "craft", "office=industrial"],
   },
   {
@@ -81,9 +100,34 @@ export function combinedOsmTags(): string[] {
   return Array.from(new Set(MARKETS.flatMap((m) => m.osmTags)));
 }
 
-/** اجتماع عبارت‌های جست‌وجوی همه‌ی بازارها (برای Google) */
+/** همه‌ی عبارت‌های جست‌وجوی یک بازار (عادی + عبارت‌های دفتر شهر) */
+function allTermsOf(m: Market): string[] {
+  return [...m.queryTerms, ...(m.officeTerms ?? [])];
+}
+
+/**
+ * اجتماع عبارت‌های جست‌وجوی همه‌ی بازارها — **چرخشی (round-robin)**، نه پشت‌سرهم.
+ *
+ * چرا چرخش اینجا و نه در web-search: بودجه‌ی Tavily (۸ فراخوان) خیلی کمتر از
+ * تعداد کل عبارت‌هاست، پس فقط ابتدای این فهرست واقعاً جست‌وجو می‌شود. اگر
+ * بازارها پشت‌سرهم بیایند، همه‌ی بودجه صرف بازار اول (صنعتی) می‌شود و کلینیک
+ * و بقیه هیچ‌وقت نوبتشان نمی‌رسد.
+ *
+ * قبلاً این کار در `interleaveTerms(terms, groupSize = 4)` انجام می‌شد که فرض
+ * می‌کرد **هر بازار دقیقاً ۴ عبارت دارد**. با اضافه‌شدن `officeTerms` به بازار
+ * صنعتی (۸ عبارت) آن فرض می‌شکست و بی‌سروصدا بازارها را نامتوازن می‌کرد. اینجا
+ * مرز بازارها معلوم است، پس چرخش درست انجام می‌شود.
+ */
 export function combinedQueryTerms(): string[] {
-  return Array.from(new Set(MARKETS.flatMap((m) => m.queryTerms)));
+  const groups = MARKETS.map(allTermsOf);
+  const longest = Math.max(0, ...groups.map((g) => g.length));
+  const out: string[] = [];
+  for (let i = 0; i < longest; i++) {
+    for (const g of groups) {
+      if (g[i]) out.push(g[i]);
+    }
+  }
+  return Array.from(new Set(out));
 }
 
 /** تگ‌های OSM متناسب با بازار (یا ترکیبی) */
@@ -91,9 +135,11 @@ export function osmTagsFor(marketId: string): string[] {
   return isAllMarkets(marketId) ? combinedOsmTags() : getMarket(marketId)?.osmTags ?? [];
 }
 
-/** عبارت‌های جست‌وجوی متناسب با بازار (یا ترکیبی) */
+/** عبارت‌های جست‌وجوی متناسب با بازار (یا ترکیبی) — شامل عبارت‌های دفتر شهر */
 export function queryTermsFor(marketId: string): string[] {
-  return isAllMarkets(marketId) ? combinedQueryTerms() : getMarket(marketId)?.queryTerms ?? [marketId];
+  if (isAllMarkets(marketId)) return combinedQueryTerms();
+  const m = getMarket(marketId);
+  return m ? allTermsOf(m) : [marketId];
 }
 
 /** بازار پیش‌فرض کمپین جدید — ترکیبی (همه با هم) */

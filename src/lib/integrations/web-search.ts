@@ -181,7 +181,17 @@ function hostOf(url: string): string {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function resultToPlace(r: any): DiscoveredPlace | null {
+/**
+ * @param term عبارتی که این نتیجه را آورده — به‌عنوان `typeLabel` ذخیره می‌شود.
+ *
+ * چرا مهم است: `discovery.ts` صنعت لید را از `p.typeLabel ?? market?.title`
+ * می‌سازد. لیدهای Tavily تا امروز `typeLabel: null` داشتند و در حالت «همه‌ی
+ * بازارها» هم `getMarket("all")` مقدار undefined می‌دهد — یعنی **صنعت همه‌ی
+ * لیدهای وب null می‌شد**. آن فیلد مستقیماً به انتخاب نمونه‌های نویسنده،
+ * پرامپت تحلیل و سیگنال ۸ توان مالی می‌رود. خودِ عبارت جست‌وجو («کلینیک
+ * زیبایی») دقیق‌تر از عنوان بازار است.
+ */
+function resultToPlace(r: any, term: string): DiscoveredPlace | null {
   const url: string = typeof r?.url === "string" ? r.url : "";
   const title: string = typeof r?.title === "string" ? r.title : "";
   if (!url) return null;
@@ -200,7 +210,7 @@ function resultToPlace(r: any): DiscoveredPlace | null {
       rating: null,
       reviewsCount: null,
       mapsUri: `https://instagram.com/${handle}`,
-      typeLabel: null,
+      typeLabel: term,
       businessStatus: "OPERATIONAL",
       source: "web_search",
       instagramHandle: "@" + handle,
@@ -229,7 +239,7 @@ function resultToPlace(r: any): DiscoveredPlace | null {
     rating: null,
     reviewsCount: null,
     mapsUri: url,
-    typeLabel: null,
+    typeLabel: term,
     businessStatus: "OPERATIONAL",
     source: "web_search",
     instagramHandle: null,
@@ -276,26 +286,29 @@ const QUERY_PATTERNS: ((term: string, city: string) => string)[] = [
 ];
 
 /**
- * عبارت‌ها را طوری می‌چیند که **از هر بازار سهم برسد**.
+ * جفت‌های «(الگو، عبارت)» را به ترتیبی می‌سازد که در بودجه‌ی محدودِ Tavily،
+ * **هم از هر بازار سهم برسد و هم هر سه الگو استفاده شوند**.
  *
- * باگی که این رفع می‌کند: قبلاً `queryTerms.slice(0, 3)` بود و چون
- * `combinedQueryTerms()` بازارها را به‌ترتیب اولویت پشت‌سرهم می‌چیند، در حالت
- * «همه‌ی بازارها» هر سه عبارت همیشه از بازار «کارخانه» می‌آمد — کلینیک زیبایی
- * و بقیه هرگز جست‌وجوی وب نمی‌شدند.
+ * باگی که این رفع می‌کند: قبلاً دو حلقه‌ی تودرتو بود با الگو در بیرون و عبارت
+ * در داخل. با ۱۶+ عبارت (حالت ترکیبی) و بودجه‌ی ۸، کل بودجه در همان الگوی اول
+ * («اینستاگرام») تمام می‌شد و الگوهای «درباره ما» و «تماس با ما» — که دقیقاً
+ * همان‌هایی‌اند که سایت واقعی کسب‌وکار را می‌آورند — هرگز اجرا نمی‌شدند.
  *
- * @param terms عبارت‌ها به‌ترتیب بازار (خروجی combinedQueryTerms)
- * @param groupSize چند عبارت در هر بازار (برای چرخش round-robin)
+ * حالا شاخص الگو با هر جفت یکی جلو می‌رود، پس ۸ جست‌وجوی اول هر سه الگو را
+ * پوشش می‌دهند. ترتیب خود عبارت‌ها از قبل در `config.combinedQueryTerms`
+ * بین بازارها چرخانده شده است.
  */
-export function interleaveTerms(terms: string[], groupSize = 4): string[] {
-  if (terms.length <= groupSize) return terms;
-  const out: string[] = [];
-  for (let i = 0; i < groupSize; i++) {
-    for (let start = 0; start < terms.length; start += groupSize) {
-      const t = terms[start + i];
-      if (t) out.push(t);
-    }
+export function buildSearchPlan(
+  terms: string[],
+  patterns: ((term: string, city: string) => string)[]
+): { term: string; pattern: (term: string, city: string) => string }[] {
+  const plan: { term: string; pattern: (term: string, city: string) => string }[] = [];
+  for (let round = 0; round < patterns.length; round++) {
+    terms.forEach((term, i) => {
+      plan.push({ term, pattern: patterns[(i + round) % patterns.length] });
+    });
   }
-  return out;
+  return plan;
 }
 
 export type WebSearchResult = {
@@ -323,26 +336,22 @@ export async function discoverViaWebSearch(
   const seen = new Set<string>();
   let searchesUsed = 0;
 
-  // عبارت‌ها چرخشی می‌شوند تا سهم همه‌ی بازارها برسد
-  const terms = interleaveTerms(queryTerms);
+  // عبارت‌ها از config چرخشی می‌آیند (سهم هر بازار)؛ اینجا الگو هم می‌چرخد
+  const plan = buildSearchPlan(queryTerms, QUERY_PATTERNS);
 
-  // گاردریل مصرف: حداکثر maxSearchesPerRun فراخوان Tavily در هر کشف.
-  // ترتیب حلقه‌ها مهم است: اول همه‌ی عبارت‌ها با الگوی ۱، بعد الگوی ۲ — تا اگر
-  // بودجه وسط کار تمام شد، دست‌کم یک جست‌وجو برای هر بازار انجام شده باشد.
-  outer: for (const pattern of QUERY_PATTERNS) {
-    for (const term of terms) {
-      if (searchesUsed >= WEB_SEARCH.maxSearchesPerRun) break outer;
-      if (out.length >= leadCap) break outer;
+  // گاردریل مصرف: حداکثر maxSearchesPerRun فراخوان Tavily در هر کشف
+  for (const { term, pattern } of plan) {
+    if (searchesUsed >= WEB_SEARCH.maxSearchesPerRun) break;
+    if (out.length >= leadCap) break;
 
-      searchesUsed++;
-      const results = await tavilySearch(pattern(term, city), WEB_SEARCH.maxResultsPerSearch);
-      for (const r of results) {
-        const place = resultToPlace(r);
-        if (place && !seen.has(place.placeId)) {
-          seen.add(place.placeId);
-          out.push(place);
-          if (out.length >= leadCap) break;
-        }
+    searchesUsed++;
+    const results = await tavilySearch(pattern(term, city), WEB_SEARCH.maxResultsPerSearch);
+    for (const r of results) {
+      const place = resultToPlace(r, term);
+      if (place && !seen.has(place.placeId)) {
+        seen.add(place.placeId);
+        out.push(place);
+        if (out.length >= leadCap) break;
       }
     }
   }

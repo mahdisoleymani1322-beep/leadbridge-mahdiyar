@@ -20,7 +20,13 @@ import {
   messageLengthFor,
   type ScoringCriterion,
 } from "@/lib/config";
-import { SERVICES, ALL_SERVICES_ID, MESSAGE_TEMPLATES } from "@/lib/brand";
+import {
+  SERVICES,
+  ALL_SERVICES_ID,
+  MESSAGE_TEMPLATES,
+  MESSAGE_SIGNATURE,
+  withSignature,
+} from "@/lib/brand";
 
 /** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
 const fa = (n: number | string) => new Intl.NumberFormat("fa-IR").format(Number(n));
@@ -2250,6 +2256,28 @@ export function Studio() {
                       </p>
                     </div>
 
+                    {/*
+                      امضای پیام — محتوای ایستا و غیرقابل‌ویرایش.
+
+                      عمداً یک بلوک متنی است و نه textarea غیرفعال: فیلد فرمی که
+                      ویرایش نمی‌شود برای اسکرین‌ریدر گمراه‌کننده است.
+
+                      امضا در دیتابیس ذخیره نمی‌شود و فقط سر کپی اضافه می‌شود —
+                      برای همین اینجا نشان داده می‌شود تا مالک دقیقاً همان چیزی
+                      را ببیند که کپی خواهد شد. جزئیات در brand.MESSAGE_SIGNATURE.
+                    */}
+                    <div className="mt-3">
+                      <h4 id={`sig-h-${m.id}`} className="text-xs font-extrabold text-ink">
+                        امضای پیام — خودکار به انتهای متن اضافه می‌شود
+                      </h4>
+                      <p
+                        aria-labelledby={`sig-h-${m.id}`}
+                        className="mt-1 whitespace-pre-line rounded-lg border border-surface-line bg-sand px-3 py-2 text-xs leading-6 text-ink-soft"
+                      >
+                        {MESSAGE_SIGNATURE}
+                      </p>
+                    </div>
+
                     {/* کانال‌های ارتباط این کسب‌وکار — قابل کلیک، برای ارسال دستی */}
                     <div className="mt-4">
                       <h4 id={`ch-h-${m.id}`} className="text-sm font-extrabold text-ink">
@@ -2373,17 +2401,17 @@ export function Studio() {
                       <button
                         type="button"
                         onClick={() => {
-                          void copyText(text).then((ok) =>
+                          void copyText(withSignature(text)).then((ok) =>
                             setTaskStatus(
                               ok
-                                ? `متن پیام «${m.businessName}» کپی شد. حالا می‌توانی در ${
+                                ? `متن پیام «${m.businessName}» همراه امضا کپی شد. حالا می‌توانی در ${
                                     m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "کانال انتخابی"
                                   } بفرستی.`
                                 : `کپی متن پیام «${m.businessName}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
                             )
                           );
                         }}
-                        aria-label={`کپی متن پیام ${m.businessName}`}
+                        aria-label={`کپی متن پیام ${m.businessName} همراه امضا`}
                         className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
                       >
                         کپی متن
@@ -2393,16 +2421,18 @@ export function Studio() {
                         <button
                           type="button"
                           onClick={() => {
-                            const full = `${m.emailSubject ?? ""}\n\n${m.emailText ?? ""}`.trim();
+                            const full = `${m.emailSubject ?? ""}\n\n${withSignature(
+                              m.emailText ?? ""
+                            )}`.trim();
                             void copyText(full).then((ok) =>
                               setTaskStatus(
                                 ok
-                                  ? `موضوع و متن ایمیل «${m.businessName}» کپی شد.`
+                                  ? `موضوع و متن ایمیل «${m.businessName}» همراه امضا کپی شد.`
                                   : `کپی ایمیل «${m.businessName}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
                               )
                             );
                           }}
-                          aria-label={`کپی ایمیل ${m.businessName} — موضوع و متن`}
+                          aria-label={`کپی ایمیل ${m.businessName} — موضوع و متن همراه امضا`}
                           className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
                         >
                           کپی ایمیل
@@ -2581,18 +2611,27 @@ export function Studio() {
                     {svc?.title ?? t.serviceId}
                   </h3>
                   <p className="mt-2 whitespace-pre-line text-sm leading-7 text-ink-muted">{t.text}</p>
+                  <h4 id={`tpl-sig-${t.serviceId}`} className="mt-3 text-xs font-extrabold text-ink">
+                    امضا — خودکار به کپی اضافه می‌شود
+                  </h4>
+                  <p
+                    aria-labelledby={`tpl-sig-${t.serviceId}`}
+                    className="mt-1 whitespace-pre-line rounded-lg border border-surface-line bg-sand px-3 py-2 text-xs leading-6 text-ink-soft"
+                  >
+                    {MESSAGE_SIGNATURE}
+                  </p>
                   <button
                     type="button"
                     onClick={() => {
-                      void copyText(t.text).then((ok) =>
+                      void copyText(withSignature(t.text)).then((ok) =>
                         setTaskStatus(
                           ok
-                            ? `قالب «${svc?.title ?? t.serviceId}» کپی شد. یادت باشد جای خالی نام و مشاهده را پر کنی.`
+                            ? `قالب «${svc?.title ?? t.serviceId}» همراه امضا کپی شد. یادت باشد جای خالی نام و مشاهده را پر کنی.`
                             : `کپی قالب «${svc?.title ?? t.serviceId}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
                         )
                       );
                     }}
-                    aria-label={`کپی قالب ${svc?.title ?? t.serviceId}`}
+                    aria-label={`کپی قالب ${svc?.title ?? t.serviceId} همراه امضا`}
                     className="mt-3 rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
                   >
                     کپی قالب

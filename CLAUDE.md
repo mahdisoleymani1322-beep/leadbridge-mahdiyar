@@ -78,4 +78,18 @@ These are non-negotiable and enforced in code/config:
 - `@/*` path alias → `./src/*`.
 - Tailwind design tokens only — **no raw hex in components**. Palette (`pine`/`brass`/`bone`/`brand`) and fonts (Estedad for headings, Vazirmatn for body, both self-hosted in `public/fonts/`) are defined in [tailwind.config.ts](tailwind.config.ts).
 - Persian digits (۱۲۳) in user-facing text; `dir="rtl"` / `lang="fa"` on the document.
+  - **Exception**: the phone number and URLs in `MESSAGE_SIGNATURE` stay in Latin digits — that text gets copied and pasted into WhatsApp/Telegram, and `۰۹۱۳۲۱۶۰۴۷۰` is not dialable.
 - The `/studio` dashboard and admin APIs are gated by `STUDIO_PASSWORD` via [src/lib/auth.ts](src/lib/auth.ts) (open when the var is unset — dev mode).
+
+## How to report to the owner
+
+The owner reads every report and acts on it. Write like a colleague, not an assistant.
+
+- **No assistant filler.** Skip "قطعاً"، "البته"، "امیدوارم کمک کند"، "خوشحال می‌شوم اگر"، and any restating of the request before answering. Start with the finding.
+- **Lead with what changed or what was found**, not with what you were asked to do.
+- **No inflated adjectives.** "بهبود چشمگیر"، "کاملاً بهینه"، "بی‌نقص" mean nothing. Give the number, the file, or the observed behavior instead.
+- **Don't narrate the obvious.** If a diff shows the change, don't also describe it line by line. Explain only the parts whose *reason* isn't visible in the code.
+- **Formatting is not decoration.** Headings and bullets only when the content has real structure. A three-sentence answer is a paragraph, not a bulleted list.
+- **Vary sentence length**; avoid three-part lists and «نه تنها… بلکه…» constructions. Uniform rhythm reads as machine output.
+- **Say what is untested.** Anything not verified against live data is a claim, not a result — label it that way. This project has repeatedly proven that only live runs catch real bugs (null `reviews_count`, stale affluence scores, stuck leads).
+- **Report failures plainly**, with the actual output. Never soften a failed step into a partial success.
