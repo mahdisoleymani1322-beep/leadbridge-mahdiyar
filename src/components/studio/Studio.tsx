@@ -1496,9 +1496,17 @@ export function Studio() {
   /** پیام فقط برای لیدی معنا دارد که تحلیل و امتیازدهی شده و منتظر پیام است */
   const canMessage = (l: Lead) => l.status === "READY_FOR_MESSAGE";
 
-  /** دو فهرست جدا — تیک‌خورده‌ها از فهرست اصلی بیرون می‌روند تا شلوغ نشود */
-  const shortlisted = leads.filter((l) => l.shortlisted);
-  const unshortlisted = leads.filter((l) => !l.shortlisted);
+  /**
+   * دو فهرست جدا — تیک‌خورده‌ها از فهرست اصلی بیرون می‌روند تا شلوغ نشود.
+   *
+   * مرتب‌سازی نزولیِ توان مالی **اینجا** هم انجام می‌شود، نه فقط در loadLeads:
+   * تضمینِ ترتیب باید کنار خودِ فهرست باشد تا اگر روزی جای دیگری هم leads
+   * ست شود (مثلاً به‌روزرسانی خوش‌بینانه)، ترتیب نشکند. لید بدون نمره ته صف
+   * می‌رود چون هنوز معلوم نیست چقدر می‌ارزد.
+   */
+  const byAffluenceDesc = (a: Lead, b: Lead) => (b.affluenceScore ?? -1) - (a.affluenceScore ?? -1);
+  const shortlisted = leads.filter((l) => l.shortlisted).sort(byAffluenceDesc);
+  const unshortlisted = leads.filter((l) => !l.shortlisted).sort(byAffluenceDesc);
 
   /**
    * لیدهای تحلیل‌نشده‌ای که نمره‌ی توان مالی‌شان کافی است.
@@ -1890,7 +1898,7 @@ export function Studio() {
 
         <LeadsTable
           leads={unshortlisted}
-          captionText="همه‌ی لیدهای کشف‌شده‌ی کمپین که هنوز به فهرست منتخب نرفته‌اند. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه درآمد واقعی."
+          captionText="همه‌ی لیدهای کشف‌شده‌ی کمپین که هنوز به فهرست منتخب نرفته‌اند، از بالاترین توان مالی به پایین‌ترین. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه درآمد واقعی."
           emptyText={busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
           idPrefix="all"
           selectedIds={selectedIds}
@@ -1941,7 +1949,7 @@ export function Studio() {
 
         <LeadsTable
           leads={shortlisted}
-          captionText="لیدهای منتخب. اینجا هر لید را جدا تحلیل و پیام‌سازی می‌کنی."
+          captionText="لیدهای منتخب، از بالاترین توان مالی به پایین‌ترین. اینجا هر لید را جدا تحلیل و پیام‌سازی می‌کنی."
           emptyText="هنوز لیدی انتخاب نکرده‌ای. از جدول بالا تیک بزن و «افزودن به فهرست منتخب» را بزن."
           idPrefix="short"
           selectedIds={shortSelectedIds}
