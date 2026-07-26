@@ -191,6 +191,14 @@ export type Message = {
   /** نمونه‌کارهای پیشنهادی برای اتچ دستی کاربر */
   recommendedPortfolioIds: string[];
   approvedBy: string | null;
+  /**
+   * تاریخ تأیید و رد.
+   *
+   * تا قبل از فاز ۶ فقط `sentAt` وجود داشت و دو تصمیم دیگرِ انسان بی‌تاریخ
+   * بودند — یعنی دفترچه‌ی تصمیم نمی‌توانست بگوید «کِی تأیید کردی».
+   */
+  approvedAt: string | null;
+  rejectedAt: string | null;
   sentAt: string | null;
   createdAt: string;
 };
@@ -202,6 +210,12 @@ export type AgentRunStatus = "running" | "done" | "error";
 export type AgentRun = {
   id: string;
   leadId: string | null;
+  /**
+   * کمپین مربوطه — برای گروه‌بندی دفترچه‌ی تصمیم.
+   * رکورد کشف `leadId: null` دارد (به یک لید خاص مربوط نیست)، پس بدون این
+   * ستون هیچ راهی برای نسبت‌دادنش به کمپین نبود.
+   */
+  campaignId: string | null;
   agentName: string;
   status: AgentRunStatus;
   summary: string;
@@ -240,6 +254,77 @@ export type LeadFeedback = {
   createdAt: string;
 };
 
+/* ── دفترچه‌ی تصمیم (audit_log) ────────────────────────────── */
+
+/**
+ * یک تصمیم ثبت‌شده — پایه‌ی صفحه‌ی CRM.
+ *
+ * جدول `audit_log` از فاز ۱ وجود داشت و تا فاز ۶ خالی ماند؛ ستون‌هایش دقیقاً
+ * شکل یک دفترچه‌ی تصمیم است، پس به‌جای ساختن جدول تازه زنده شد.
+ *
+ * فقط از طریق `lib/audit.recordDecision()` نوشته می‌شود تا شکل رکوردها یکدست
+ * بماند. تاریخچه‌ی **قبل از** فاز ۶ اینجا نیست و صفحه‌ی CRM آن را از
+ * `agent_runs`/`campaigns`/`leads`/`messages` بازسازی می‌کند.
+ */
+export type AuditAction =
+  | "campaign.created"
+  | "discovery.run"
+  | "lead.shortlisted"
+  | "lead.unshortlisted"
+  | "lead.replied"
+  | "lead.converted"
+  | "message.edited"
+  | "message.approved"
+  | "message.rejected"
+  | "message.sent";
+
+export type AuditEntry = {
+  id: string;
+  entityType: "campaign" | "lead" | "message";
+  entityId: string | null;
+  action: AuditAction;
+  /** توضیح خوانا برای انسان — همان چیزی که در دفترچه نشان داده می‌شود */
+  reason: string | null;
+  beforeData: unknown;
+  afterData: unknown;
+  createdAt: string;
+};
+
+/* ── گفت‌وگو / پیگیری لید ──────────────────────────────────── */
+
+/** وضعیت گفت‌وگو با لید پس از ارسال پیام */
+export type ConversationState = "no_reply" | "replied" | "meeting" | "closed";
+export type ConversationSentiment = "positive" | "neutral" | "negative";
+
+/**
+ * ثبت پاسخ بیزینس و پیگیری — یک ردیف به‌ازای هر لید (upsert روی leadId).
+ *
+ * جدول `conversations` هم از فاز ۱ خالی مانده بود و ستون‌هایش دقیقاً همین
+ * کار را می‌خواستند.
+ *
+ * جدا از `LeadFeedback` می‌ماند و با آن قاطی نمی‌شود: این «بیزینس چه گفت»
+ * است، آن «کیفیت خودِ پیام ما چطور بود» (ورودی خام خودبهبودی).
+ */
+export type Conversation = {
+  id: string;
+  leadId: string;
+  channel: ChannelKey | null;
+  conversationState: ConversationState | null;
+  summary: string | null;
+  sentiment: ConversationSentiment | null;
+  intent: string | null;
+  nextAction: string | null;
+  /** تاریخ پیگیری بعدی — برای بخش «پیگیری‌های سررسیدشده» */
+  nextActionAt: string | null;
+  handoverRequired: boolean;
+  lastMessageAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** بازه‌ی تاریخ برای کوئری‌های صفحه‌ی CRM (ISO؛ هر دو اختیاری) */
+export type DateRange = { from?: string; to?: string };
+
 /* ── قرارداد لایه‌ی ذخیره‌سازی ─────────────────────────────── */
 
 export interface LeadStore {
@@ -258,6 +343,9 @@ export interface LeadStore {
     campaignId?: string;
     status?: LeadStatus;
     limit?: number;
+    /** بازه بر اساس created_at — برای صفحه‌ی CRM */
+    from?: string;
+    to?: string;
   }): Promise<Lead[]>;
 
   // تحلیل لید
@@ -273,11 +361,23 @@ export interface LeadStore {
   createMessage(msg: Message): Promise<void>;
   updateMessage(id: string, patch: Partial<Message>): Promise<void>;
   getMessage(id: string): Promise<Message | null>;
-  listMessages(opts?: { leadId?: string; status?: MessageStatus }): Promise<Message[]>;
+  listMessages(opts?: {
+    leadId?: string;
+    status?: MessageStatus;
+    from?: string;
+    to?: string;
+  }): Promise<Message[]>;
 
   // ثبت اجرای ایجنت
   addAgentRun(run: AgentRun): Promise<void>;
   listAgentRuns(leadId?: string, limit?: number): Promise<AgentRun[]>;
+  /**
+   * اجراهای یک بازه‌ی زمانی — مستقل از لید.
+   *
+   * جدا از `listAgentRuns` است چون آن امضای لیدمحور در چند جای ارکستریتور
+   * استفاده می‌شود و عوض‌کردنش بی‌دلیل پرریسک بود.
+   */
+  listAgentRunsBetween(opts: DateRange & { campaignId?: string; limit?: number }): Promise<AgentRun[]>;
 
   // درس‌ها (خودبهبودی)
   addLesson(lesson: Lesson): Promise<void>;
@@ -287,4 +387,13 @@ export interface LeadStore {
   // بازخورد انسانی
   addFeedback(fb: LeadFeedback): Promise<void>;
   listFeedback(leadId?: string): Promise<LeadFeedback[]>;
+
+  // دفترچه‌ی تصمیم (فقط از lib/audit.recordDecision نوشته می‌شود)
+  addAudit(entry: AuditEntry): Promise<void>;
+  listAudit(opts: DateRange & { entityType?: AuditEntry["entityType"]; limit?: number }): Promise<AuditEntry[]>;
+
+  // گفت‌وگو/پیگیری لید — یک ردیف به‌ازای هر لید
+  upsertConversation(c: Conversation): Promise<void>;
+  getConversation(leadId: string): Promise<Conversation | null>;
+  listConversations(opts?: DateRange & { leadId?: string; limit?: number }): Promise<Conversation[]>;
 }

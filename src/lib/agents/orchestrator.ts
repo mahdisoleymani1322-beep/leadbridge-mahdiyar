@@ -94,6 +94,8 @@ export async function runLeadStep(
     await store.addAgentRun({
       id: randomUUID(),
       leadId,
+      // برای گروه‌بندی دفترچه‌ی تصمیم بر اساس کمپین
+      campaignId: lead.campaignId,
       agentName: agent,
       status,
       summary,
@@ -366,6 +368,8 @@ export async function runLeadStep(
         painTargeted: draft.painTargeted,
         recommendedPortfolioIds,
         approvedBy: null,
+        approvedAt: null,
+        rejectedAt: null,
         sentAt: null,
         createdAt: new Date().toISOString(),
       };
@@ -507,6 +511,11 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
   const lead = await store.getLead(leadId);
   if (!lead) throw new Error("لید یافت نشد.");
 
+  // بیرون از closure گرفته می‌شود: `step` یک function declaration هوست‌شده است و
+  // TypeScript نمی‌تواند تضمین کند بعد از چکِ null بالا اجرا می‌شود، پس narrowing
+  // را از دست می‌دهد.
+  const runCampaignId = lead.campaignId;
+
   const steps: PipelineResult["steps"] = [];
   const seenHashes = new Set<string>();
   let stepCount = 0;
@@ -543,6 +552,7 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
       await store.addAgentRun({
         id: randomUUID(),
         leadId,
+        campaignId: runCampaignId,
         agentName: agent,
         status: "done",
         summary,
@@ -563,6 +573,7 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
       await store.addAgentRun({
         id: randomUUID(),
         leadId,
+        campaignId: runCampaignId,
         agentName: agent,
         status: "error",
         summary: message,

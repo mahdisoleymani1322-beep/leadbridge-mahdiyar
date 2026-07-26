@@ -4,6 +4,7 @@ import { getStore, type Campaign } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { DEFAULT_CITY, DEFAULT_MARKET_ID, LIMITS, getMarket, isAllMarkets, marketLabel } from "@/lib/config";
 import { SERVICES, ALL_SERVICES_ID } from "@/lib/brand";
+import { recordDecision } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -52,5 +53,12 @@ export async function POST(req: NextRequest) {
   };
 
   await getStore().createCampaign(campaign);
+  await recordDecision({
+    entityType: "campaign",
+    entityId: campaign.id,
+    action: "campaign.created",
+    reason: `کمپین «${campaign.name}» ساخته شد — بازار: ${marketTitle}، شهر: ${city}.`,
+    afterData: { market, city, dailyDiscoveryLimit: campaign.dailyDiscoveryLimit },
+  });
   return Response.json({ campaign }, { status: 201 });
 }

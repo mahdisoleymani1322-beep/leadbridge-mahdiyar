@@ -1,8 +1,11 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   AgentRun,
+  AuditEntry,
   Campaign,
   ContactChannels,
+  Conversation,
+  DateRange,
   Lead,
   LeadAnalysis,
   LeadFeedback,
@@ -232,6 +235,8 @@ function messageToRow(m: Message) {
     pain_targeted: m.painTargeted,
     recommended_portfolio_ids: m.recommendedPortfolioIds,
     approved_by: m.approvedBy,
+    approved_at: m.approvedAt,
+    rejected_at: m.rejectedAt,
     sent_at: m.sentAt,
     created_at: m.createdAt,
   };
@@ -250,6 +255,8 @@ function messageFromRow(r: any): Message {
     painTargeted: r.pain_targeted,
     recommendedPortfolioIds: r.recommended_portfolio_ids ?? [],
     approvedBy: r.approved_by,
+    approvedAt: r.approved_at ?? null,
+    rejectedAt: r.rejected_at ?? null,
     sentAt: r.sent_at,
     createdAt: r.created_at,
   };
@@ -261,6 +268,7 @@ function agentRunToRow(r: AgentRun) {
   return {
     id: r.id,
     lead_id: r.leadId,
+    campaign_id: r.campaignId,
     agent_name: r.agentName,
     status: r.status,
     summary: r.summary,
@@ -278,6 +286,7 @@ function agentRunFromRow(r: any): AgentRun {
   return {
     id: r.id,
     leadId: r.lead_id,
+    campaignId: r.campaign_id ?? null,
     agentName: r.agent_name,
     status: r.status,
     summary: r.summary,
@@ -311,6 +320,68 @@ function feedbackFromRow(r: any): LeadFeedback {
     rating: r.rating,
     comment: r.comment,
     createdAt: r.created_at,
+  };
+}
+
+/* ── دفترچه‌ی تصمیم و گفت‌وگو ─────────────────────────────── */
+
+function auditToRow(a: AuditEntry) {
+  return {
+    id: a.id,
+    entity_type: a.entityType,
+    entity_id: a.entityId,
+    action: a.action,
+    reason: a.reason,
+    before_data: a.beforeData ?? null,
+    after_data: a.afterData ?? null,
+    created_at: a.createdAt,
+  };
+}
+function auditFromRow(r: any): AuditEntry {
+  return {
+    id: r.id,
+    entityType: r.entity_type,
+    entityId: r.entity_id,
+    action: r.action,
+    reason: r.reason,
+    beforeData: r.before_data,
+    afterData: r.after_data,
+    createdAt: r.created_at,
+  };
+}
+
+function conversationToRow(c: Conversation) {
+  return {
+    id: c.id,
+    lead_id: c.leadId,
+    channel: c.channel,
+    conversation_state: c.conversationState,
+    summary: c.summary,
+    sentiment: c.sentiment,
+    intent: c.intent,
+    next_action: c.nextAction,
+    next_action_at: c.nextActionAt,
+    handover_required: c.handoverRequired,
+    last_message_at: c.lastMessageAt,
+    created_at: c.createdAt,
+    updated_at: c.updatedAt,
+  };
+}
+function conversationFromRow(r: any): Conversation {
+  return {
+    id: r.id,
+    leadId: r.lead_id,
+    channel: r.channel,
+    conversationState: r.conversation_state,
+    summary: r.summary,
+    sentiment: r.sentiment,
+    intent: r.intent,
+    nextAction: r.next_action,
+    nextActionAt: r.next_action_at ?? null,
+    handoverRequired: r.handover_required ?? false,
+    lastMessageAt: r.last_message_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
   };
 }
 
@@ -362,10 +433,18 @@ export class SupabaseStore implements LeadStore {
       .maybeSingle();
     return data ? leadFromRow(data) : null;
   }
-  async listLeads(opts?: { campaignId?: string; status?: LeadStatus; limit?: number }) {
+  async listLeads(opts?: {
+    campaignId?: string;
+    status?: LeadStatus;
+    limit?: number;
+    from?: string;
+    to?: string;
+  }) {
     let q = client().from("leads").select("*").order("created_at", { ascending: false });
     if (opts?.campaignId) q = q.eq("campaign_id", opts.campaignId);
     if (opts?.status) q = q.eq("status", opts.status);
+    if (opts?.from) q = q.gte("created_at", opts.from);
+    if (opts?.to) q = q.lte("created_at", opts.to);
     if (opts?.limit) q = q.limit(opts.limit);
     const { data, error } = await q;
     if (error) throw new Error(`خواندن لیدها ناموفق بود: ${error.message}`);
@@ -424,10 +503,12 @@ export class SupabaseStore implements LeadStore {
     const { data } = await client().from("messages").select("*").eq("id", id).maybeSingle();
     return data ? messageFromRow(data) : null;
   }
-  async listMessages(opts?: { leadId?: string; status?: MessageStatus }) {
+  async listMessages(opts?: { leadId?: string; status?: MessageStatus; from?: string; to?: string }) {
     let q = client().from("messages").select("*").order("created_at", { ascending: false });
     if (opts?.leadId) q = q.eq("lead_id", opts.leadId);
     if (opts?.status) q = q.eq("status", opts.status);
+    if (opts?.from) q = q.gte("created_at", opts.from);
+    if (opts?.to) q = q.lte("created_at", opts.to);
     const { data, error } = await q;
     if (error) throw new Error(`خواندن پیام‌ها ناموفق بود: ${error.message}`);
     return (data ?? []).map(messageFromRow);
@@ -489,5 +570,68 @@ export class SupabaseStore implements LeadStore {
     if (leadId) q = q.eq("lead_id", leadId);
     const { data } = await q;
     return (data ?? []).map(feedbackFromRow);
+  }
+
+  /* اجراهای یک بازه — مستقل از لید (صفحه‌ی CRM) */
+  async listAgentRunsBetween(opts: DateRange & { campaignId?: string; limit?: number }) {
+    let q = client()
+      .from("agent_runs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(opts.limit ?? 500);
+    if (opts.from) q = q.gte("created_at", opts.from);
+    if (opts.to) q = q.lte("created_at", opts.to);
+    if (opts.campaignId) q = q.eq("campaign_id", opts.campaignId);
+    const { data, error } = await q;
+    if (error) throw new Error(`خواندن اجراهای ایجنت ناموفق بود: ${error.message}`);
+    return (data ?? []).map(agentRunFromRow);
+  }
+
+  /* دفترچه‌ی تصمیم */
+  async addAudit(entry: AuditEntry) {
+    const { error } = await client().from("audit_log").insert(auditToRow(entry));
+    if (error) throw new Error(`ثبت تصمیم ناموفق بود: ${error.message}`);
+  }
+  async listAudit(opts: DateRange & { entityType?: AuditEntry["entityType"]; limit?: number }) {
+    let q = client()
+      .from("audit_log")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(opts.limit ?? 500);
+    if (opts.from) q = q.gte("created_at", opts.from);
+    if (opts.to) q = q.lte("created_at", opts.to);
+    if (opts.entityType) q = q.eq("entity_type", opts.entityType);
+    const { data, error } = await q;
+    if (error) throw new Error(`خواندن دفترچه‌ی تصمیم ناموفق بود: ${error.message}`);
+    return (data ?? []).map(auditFromRow);
+  }
+
+  /* گفت‌وگو / پیگیری — یک ردیف به‌ازای هر لید */
+  async upsertConversation(c: Conversation) {
+    const { error } = await client()
+      .from("conversations")
+      .upsert(conversationToRow(c), { onConflict: "lead_id" });
+    if (error) throw new Error(`ثبت گفت‌وگو ناموفق بود: ${error.message}`);
+  }
+  async getConversation(leadId: string) {
+    const { data } = await client()
+      .from("conversations")
+      .select("*")
+      .eq("lead_id", leadId)
+      .maybeSingle();
+    return data ? conversationFromRow(data) : null;
+  }
+  async listConversations(opts?: DateRange & { leadId?: string; limit?: number }) {
+    let q = client()
+      .from("conversations")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(opts?.limit ?? 500);
+    if (opts?.leadId) q = q.eq("lead_id", opts.leadId);
+    if (opts?.from) q = q.gte("updated_at", opts.from);
+    if (opts?.to) q = q.lte("updated_at", opts.to);
+    const { data, error } = await q;
+    if (error) throw new Error(`خواندن گفت‌وگوها ناموفق بود: ${error.message}`);
+    return (data ?? []).map(conversationFromRow);
   }
 }

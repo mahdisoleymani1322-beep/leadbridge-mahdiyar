@@ -4,6 +4,7 @@ import { getStore, type Lead, type LeadStatus, type ContactChannels, type Channe
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { CHANNEL_PRIORITY } from "@/lib/config";
 import { computeDedupKey } from "@/lib/agents/validation";
+import { recordDecision } from "@/lib/audit";
 import { pickPreferredChannel } from "@/lib/integrations/contact-channels";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +43,7 @@ export async function PATCH(req: NextRequest) {
   const store = getStore();
   const now = new Date().toISOString();
   let updated = 0;
+  const names: string[] = [];
   for (const id of ids) {
     const lead = await store.getLead(id);
     if (!lead) continue;
@@ -50,6 +52,21 @@ export async function PATCH(req: NextRequest) {
       shortlistedAt: shortlisted ? now : null,
     });
     updated++;
+    names.push(lead.businessName);
+  }
+
+  // یک رکورد برای کل دسته، نه یکی به‌ازای هر لید: انتخاب چند لید با یک کلیک
+  // **یک تصمیم** است و ۲۰ ردیف جدا دفترچه را بی‌خود شلوغ می‌کند.
+  if (updated > 0) {
+    await recordDecision({
+      entityType: "lead",
+      entityId: ids.length === 1 ? ids[0] : null,
+      action: shortlisted ? "lead.shortlisted" : "lead.unshortlisted",
+      reason: `${updated} لید ${shortlisted ? "به فهرست منتخب اضافه شد" : "از فهرست منتخب برداشته شد"}: ${names
+        .slice(0, 5)
+        .join("، ")}${names.length > 5 ? ` و ${names.length - 5} مورد دیگر` : ""}.`,
+      afterData: { count: updated, leadIds: ids, names },
+    });
   }
 
   return Response.json({ updated, shortlisted });

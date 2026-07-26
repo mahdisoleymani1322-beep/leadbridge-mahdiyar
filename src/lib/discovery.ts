@@ -17,6 +17,7 @@ import { extractContactChannels } from "@/lib/integrations/contact-channels";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
 import { computeDedupKey, validateCandidate, type LeadCandidate } from "@/lib/agents/validation";
 import { scoreAffluence } from "@/lib/agents/affluence";
+import { recordDecision } from "@/lib/audit";
 
 /**
  * جریان کشف لید (کمپین‌محور) — سرویس قطعی، صفر توکن LLM.
@@ -250,6 +251,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
   await store.addAgentRun({
     id: randomUUID(),
     leadId: null,
+    // بدون این، رکورد کشف (که leadId ندارد) به هیچ کمپینی قابل‌نسبت‌دادن نبود
+    campaignId,
     agentName: "discovery",
     status: summary.errors > 0 && summary.inserted === 0 ? "error" : "done",
     summary: `کشف (${source}) «${summary.query}»: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر · ${summary.webSearches} جست‌وجوی وب`,
@@ -261,6 +264,14 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     stopReason: "completed",
     errorCode: null,
     createdAt: new Date().toISOString(),
+  });
+
+  await recordDecision({
+    entityType: "campaign",
+    entityId: campaignId,
+    action: "discovery.run",
+    reason: `کشف لید برای «${campaign.name}»: ${summary.inserted} لید جدید از ${summary.found} یافته (${summary.duplicates} تکراری، ${summary.webSearches} جست‌وجوی وب).`,
+    afterData: summary,
   });
 
   return summary;

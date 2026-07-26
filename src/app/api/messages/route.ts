@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { getStore, type MessageStatus } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { checkPolicy } from "@/lib/agents/policy-guard";
+import { recordDecision } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -69,37 +70,81 @@ export async function PATCH(req: NextRequest) {
   if (!msg) return Response.json({ error: "پیام یافت نشد." }, { status: 404 });
 
   const now = new Date().toISOString();
+  // نام کسب‌وکار برای متن خوانای دفترچه‌ی تصمیم (شناسه‌ی UUID به درد مالک نمی‌خورد)
+  const leadOfMsg = await store.getLead(msg.leadId);
+  const who = leadOfMsg?.businessName ?? "لید نامشخص";
+  const statusBefore = leadOfMsg?.status ?? null;
 
   switch (action) {
     case "edit": {
       const text = typeof body.text === "string" ? body.text.trim() : "";
       if (!text) return Response.json({ error: "متن خالی است." }, { status: 400 });
       await store.updateMessage(id, { finalText: text });
+      await recordDecision({
+        entityType: "message",
+        entityId: id,
+        action: "message.edited",
+        reason: `متن پیام «${who}» دستی ویرایش شد.`,
+        beforeData: { text: msg.finalText ?? msg.draftText },
+        afterData: { text },
+      });
       break;
     }
     case "approve": {
       const text = msg.finalText ?? msg.draftText;
       // گاردریل: پیام ناقض سیاست هرگز تأیید نمی‌شود (حتی با کلیک انسان)
-      const lead = await store.getLead(msg.leadId);
-      const policy = checkPolicy(text, { businessName: lead?.businessName });
+      const policy = checkPolicy(text, { businessName: leadOfMsg?.businessName });
       if (policy.verdict === "BLOCK") {
         return Response.json(
           { error: `تأیید ممکن نیست — نقض سیاست: ${policy.violations.join("، ")}` },
           { status: 400 }
         );
       }
-      await store.updateMessage(id, { status: "approved", approvedBy: "human", finalText: text });
+      await store.updateMessage(id, {
+        status: "approved",
+        approvedBy: "human",
+        approvedAt: now,
+        finalText: text,
+      });
       await store.updateLead(msg.leadId, { status: "APPROVED" });
+      await recordDecision({
+        entityType: "message",
+        entityId: id,
+        action: "message.approved",
+        reason: `پیام «${who}» تأیید شد${
+          msg.criticScore != null ? ` (نمره‌ی منتقد: ${msg.criticScore})` : ""
+        }.`,
+        beforeData: { leadStatus: statusBefore },
+        afterData: { leadStatus: "APPROVED", channel: msg.targetChannel },
+      });
       break;
     }
     case "reject": {
-      await store.updateMessage(id, { status: "rejected" });
+      await store.updateMessage(id, { status: "rejected", rejectedAt: now });
       await store.updateLead(msg.leadId, { status: "REJECTED" });
+      await recordDecision({
+        entityType: "message",
+        entityId: id,
+        action: "message.rejected",
+        reason: `پیام «${who}» رد شد.`,
+        beforeData: { leadStatus: statusBefore },
+        afterData: { leadStatus: "REJECTED" },
+      });
       break;
     }
     case "sent": {
       await store.updateMessage(id, { status: "sent", sentAt: now });
       await store.updateLead(msg.leadId, { status: "SENT" });
+      await recordDecision({
+        entityType: "message",
+        entityId: id,
+        action: "message.sent",
+        reason: `پیام «${who}» ارسال شد${
+          msg.targetChannel ? ` (کانال: ${msg.targetChannel})` : ""
+        }.`,
+        beforeData: { leadStatus: statusBefore },
+        afterData: { leadStatus: "SENT", channel: msg.targetChannel },
+      });
       break;
     }
     default:

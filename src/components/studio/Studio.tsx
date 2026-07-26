@@ -2270,12 +2270,18 @@ export function Studio() {
                       <h4 id={`sig-h-${m.id}`} className="text-xs font-extrabold text-ink">
                         امضای پیام — خودکار به انتهای متن اضافه می‌شود
                       </h4>
-                      <p
+                      {/*
+                        role="group" (نه <p> خالی): پاراگراف نقشی ندارد که
+                        aria-labelledby را بپذیرد، پس نام روی آن بی‌اثر است.
+                        group نام می‌پذیرد و بلوک را یک واحد قابل‌تشخیص می‌کند.
+                      */}
+                      <div
+                        role="group"
                         aria-labelledby={`sig-h-${m.id}`}
                         className="mt-1 whitespace-pre-line rounded-lg border border-surface-line bg-sand px-3 py-2 text-xs leading-6 text-ink-soft"
                       >
                         {MESSAGE_SIGNATURE}
-                      </p>
+                      </div>
                     </div>
 
                     {/* کانال‌های ارتباط این کسب‌وکار — قابل کلیک، برای ارسال دستی */}
@@ -2614,12 +2620,13 @@ export function Studio() {
                   <h4 id={`tpl-sig-${t.serviceId}`} className="mt-3 text-xs font-extrabold text-ink">
                     امضا — خودکار به کپی اضافه می‌شود
                   </h4>
-                  <p
+                  <div
+                    role="group"
                     aria-labelledby={`tpl-sig-${t.serviceId}`}
                     className="mt-1 whitespace-pre-line rounded-lg border border-surface-line bg-sand px-3 py-2 text-xs leading-6 text-ink-soft"
                   >
                     {MESSAGE_SIGNATURE}
-                  </p>
+                  </div>
                   <button
                     type="button"
                     onClick={() => {

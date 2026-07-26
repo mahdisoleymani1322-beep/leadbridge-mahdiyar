@@ -2,7 +2,10 @@ import { randomUUID } from "crypto";
 import { PORTFOLIO_SEED } from "@/lib/brand";
 import type {
   AgentRun,
+  AuditEntry,
   Campaign,
+  Conversation,
+  DateRange,
   Lead,
   LeadAnalysis,
   LeadFeedback,
@@ -13,6 +16,14 @@ import type {
   MessageStatus,
   PortfolioItem,
 } from "./types";
+
+/** فیلتر بازه روی یک تاریخ ISO — مشترک بین همه‌ی کوئری‌های صفحه‌ی CRM */
+function inRange(at: string | null | undefined, r: DateRange): boolean {
+  if (!at) return false;
+  if (r.from && at < r.from) return false;
+  if (r.to && at > r.to) return false;
+  return true;
+}
 
 /**
  * ذخیره‌سازی در حافظه — برای اجرای محلی/تست بدون Supabase.
@@ -33,6 +44,8 @@ type MemoryState = {
   agentRuns: AgentRun[];
   lessons: Map<string, Lesson>;
   feedback: LeadFeedback[];
+  audit: AuditEntry[];
+  conversations: Map<string, Conversation>; // key = leadId
 };
 
 const g = globalThis as typeof globalThis & { __mahdiyarCrmMemory?: MemoryState };
@@ -54,6 +67,8 @@ function state(): MemoryState {
       agentRuns: [],
       lessons: new Map(),
       feedback: [],
+      audit: [],
+      conversations: new Map(),
     };
   }
   return g.__mahdiyarCrmMemory;
@@ -92,10 +107,17 @@ export class MemoryStore implements LeadStore {
     for (const l of state().leads.values()) if (l.dedupKey === dedupKey) return l;
     return null;
   }
-  async listLeads(opts?: { campaignId?: string; status?: LeadStatus; limit?: number }) {
+  async listLeads(opts?: {
+    campaignId?: string;
+    status?: LeadStatus;
+    limit?: number;
+    from?: string;
+    to?: string;
+  }) {
     let all = [...state().leads.values()];
     if (opts?.campaignId) all = all.filter((l) => l.campaignId === opts.campaignId);
     if (opts?.status) all = all.filter((l) => l.status === opts.status);
+    if (opts?.from || opts?.to) all = all.filter((l) => inRange(l.createdAt, opts));
     all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return opts?.limit ? all.slice(0, opts.limit) : all;
   }
@@ -133,10 +155,11 @@ export class MemoryStore implements LeadStore {
   async getMessage(id: string) {
     return state().messages.get(id) ?? null;
   }
-  async listMessages(opts?: { leadId?: string; status?: MessageStatus }) {
+  async listMessages(opts?: { leadId?: string; status?: MessageStatus; from?: string; to?: string }) {
     let all = [...state().messages.values()];
     if (opts?.leadId) all = all.filter((m) => m.leadId === opts.leadId);
     if (opts?.status) all = all.filter((m) => m.status === opts.status);
+    if (opts?.from || opts?.to) all = all.filter((m) => inRange(m.createdAt, opts));
     return all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
@@ -177,5 +200,42 @@ export class MemoryStore implements LeadStore {
       ? state().feedback.filter((f) => f.leadId === leadId)
       : state().feedback;
     return [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /* ── اجراهای یک بازه ── */
+  async listAgentRunsBetween(opts: DateRange & { campaignId?: string; limit?: number }) {
+    let all = state().agentRuns.filter((r) => inRange(r.createdAt, opts));
+    if (opts.campaignId) all = all.filter((r) => r.campaignId === opts.campaignId);
+    return all
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, opts.limit ?? 500);
+  }
+
+  /* ── دفترچه‌ی تصمیم ── */
+  async addAudit(entry: AuditEntry) {
+    state().audit.push(entry);
+  }
+  async listAudit(opts: DateRange & { entityType?: AuditEntry["entityType"]; limit?: number }) {
+    let all = state().audit.filter((a) => inRange(a.createdAt, opts));
+    if (opts.entityType) all = all.filter((a) => a.entityType === opts.entityType);
+    return all
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, opts.limit ?? 500);
+  }
+
+  /* ── گفت‌وگو / پیگیری ── */
+  async upsertConversation(c: Conversation) {
+    state().conversations.set(c.leadId, c);
+  }
+  async getConversation(leadId: string) {
+    return state().conversations.get(leadId) ?? null;
+  }
+  async listConversations(opts?: DateRange & { leadId?: string; limit?: number }) {
+    let all = [...state().conversations.values()];
+    if (opts?.leadId) all = all.filter((c) => c.leadId === opts.leadId);
+    if (opts?.from || opts?.to) all = all.filter((c) => inRange(c.updatedAt, opts));
+    return all
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, opts?.limit ?? 500);
   }
 }
