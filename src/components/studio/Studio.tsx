@@ -11,7 +11,13 @@ import type {
   AgentRun,
   AgentRunStatus,
 } from "@/lib/store/types";
-import { MARKETS, SCORING_WEIGHTS, type ScoringCriterion } from "@/lib/config";
+import {
+  MARKETS,
+  SCORING_WEIGHTS,
+  CRITIC_THRESHOLDS,
+  MESSAGE_RULES,
+  type ScoringCriterion,
+} from "@/lib/config";
 import { SERVICES } from "@/lib/brand";
 
 /** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
@@ -102,6 +108,68 @@ function Channels({ channels }: { channels: ContactChannels }) {
     </ul>
   );
 }
+
+/* ── پیام‌ها (فاز ۴) ──────────────────────────────────────── */
+
+type PolicyCheckView = { id: string; label: string; pass: boolean; detail: string };
+
+type MessageView = {
+  id: string;
+  leadId: string;
+  businessName: string;
+  targetChannel: ChannelKey | null;
+  draftText: string;
+  finalText: string | null;
+  emailSubject: string | null;
+  emailText: string | null;
+  status: "draft" | "approved" | "rejected" | "sent";
+  criticScore: number | null;
+  painTargeted: string | null;
+  recommendedPortfolioIds: string[];
+  portfolio: { id: string; title: string; publicUrl: string; service: string }[];
+  contactChannels: ContactChannels;
+  policy: { verdict: "PASS" | "BLOCK" | "HUMAN_REVIEW"; checks: PolicyCheckView[]; violations: string[] };
+};
+
+const VERDICT_LABELS: Record<MessageView["policy"]["verdict"], string> = {
+  PASS: "قبول نگهبان سیاست",
+  HUMAN_REVIEW: "نیاز به بازبینی انسانی",
+  BLOCK: "مسدود — تأیید ممکن نیست",
+};
+
+const MSG_STATUS_LABELS: Record<MessageView["status"], string> = {
+  draft: "پیش‌نویس",
+  approved: "تأییدشده",
+  rejected: "ردشده",
+  sent: "ارسال‌شده",
+};
+
+/** متن فعلیِ قابل‌ویرایش پیام (نسخه‌ی نهایی اگر ویرایش شده، وگرنه پیش‌نویس) */
+const currentText = (m: MessageView) => m.finalText ?? m.draftText;
+
+/** شمارش کلمات — همان تقریبی که policy-guard سمت سرور استفاده می‌کند */
+const wordCount = (t: string) => t.trim().split(/\s+/).filter(Boolean).length;
+
+/**
+ * معنی نمره‌ی منتقد **به کلمات**.
+ * عمداً از meter/progressbar استفاده نمی‌شود: نمره بدون آستانه بی‌معناست و
+ * نوار پیشرفت برای screen reader فقط یک عدد خام می‌خواند.
+ */
+function scoreBand(score: number | null): string {
+  if (score == null) return "نمره‌ی منتقد ثبت نشده است";
+  if (score >= CRITIC_THRESHOLDS.pass) return "کیفیت قابل‌قبول برای ارسال";
+  if (score >= CRITIC_THRESHOLDS.revise) return "کیفیت مرزی — بازبینی انسانی لازم است";
+  return "کیفیت پایین — بهتر است متن بازنویسی شود";
+}
+
+type MsgFilter = "all" | "draft" | "approved" | "sent";
+
+const MSG_FILTERS: { id: MsgFilter; label: string }[] = [
+  { id: "all", label: "همه" },
+  { id: "draft", label: "فقط پیش‌نویس‌ها" },
+  { id: "approved", label: "فقط تأییدشده‌ها" },
+  { id: "sent", label: "فقط ارسال‌شده‌ها" },
+];
 
 /* ── پنل جزئیات لید (تحلیل + ریز امتیاز + تایم‌لاین) ───────── */
 
@@ -257,10 +325,45 @@ export function Studio() {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
-  const [taskStatus, setTaskStatus] = useState(""); // کانال اعلان زنده‌ی جدا
+  // کانال اعلان زنده‌ی جدا. nonce لازم است: اگر متن دقیقاً تکراری باشد، React
+  // گره‌ی متنی را عوض نمی‌کند و screen reader چیزی اعلام نمی‌کند.
+  const [taskStatusState, setTaskStatusState] = useState<{ text: string; n: number }>({
+    text: "",
+    n: 0,
+  });
+  const setTaskStatus = useCallback(
+    (text: string) => setTaskStatusState((p) => ({ text, n: p.n + 1 })),
+    []
+  );
   const [openId, setOpenId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, LeadDetail>>({});
   const triggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  // پیام‌ها (فاز ۴)
+  const [messages, setMessages] = useState<MessageView[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [savedAt, setSavedAt] = useState<Record<string, string>>({});
+  const [cardError, setCardError] = useState<Record<string, string>>({});
+  const [msgBusyId, setMsgBusyId] = useState<string | null>(null);
+  const [msgFilter, setMsgFilter] = useState<MsgFilter>("all");
+  const [armed, setArmed] = useState<{ id: string; action: "approve" | "reject" } | null>(null);
+  const [openEmailId, setOpenEmailId] = useState<string | null>(null);
+  const actionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const confirmRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const emailTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  // فوکوس روی دکمه‌ی تأیید نهایی — همین جابه‌جایی خودش «اعلانِ» مسلح‌شدن است
+  useEffect(() => {
+    if (armed) confirmRefs.current[`${armed.id}:${armed.action}`]?.focus();
+  }, [armed]);
+
+  /** لغو حالت مسلح + بازگرداندن فوکوس به دکمه‌ی آغازگر */
+  const disarm = useCallback(() => {
+    setArmed((cur) => {
+      if (cur) actionRefs.current[`${cur.id}:${cur.action}`]?.focus();
+      return null;
+    });
+  }, []);
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
@@ -290,6 +393,13 @@ export function Studio() {
     setRemaining(leads.filter((l) => l.status === "NEW").length);
   }, []);
 
+  /** پیام‌های کمپین انتخابی + نتیجه‌ی زنده‌ی نگهبان سیاست (صفر توکن) */
+  const loadMessages = useCallback(async (campaignId: string) => {
+    const q = campaignId ? `?campaignId=${encodeURIComponent(campaignId)}` : "";
+    const { messages } = await api<{ messages: MessageView[] }>(`/api/messages${q}`);
+    setMessages(messages);
+  }, []);
+
   useEffect(() => {
     (async () => {
       setBusy("load");
@@ -299,6 +409,7 @@ export function Studio() {
         if (cs[0]) {
           setSelectedId(cs[0].id);
           await loadLeads(cs[0].id);
+          await loadMessages(cs[0].id);
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -306,14 +417,16 @@ export function Studio() {
         setBusy(null);
       }
     })();
-  }, [loadCampaigns, loadLeads]);
+  }, [loadCampaigns, loadLeads, loadMessages]);
 
   async function selectCampaign(id: string) {
     setSelectedId(id);
     setError("");
     setNotice("");
+    setArmed(null);
     try {
       await loadLeads(id);
+      await loadMessages(id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -379,7 +492,10 @@ export function Studio() {
           r ? LEAD_STATUS_LABELS[r.finalStatus] : "نامشخص"
         }.`
       );
-      if (selectedId) await loadLeads(selectedId);
+      if (selectedId) {
+        await loadLeads(selectedId);
+        await loadMessages(selectedId);
+      }
       await loadDetail(lead.id);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -415,6 +531,7 @@ export function Studio() {
     );
 
     let analyzed = 0; // تعداد لیدهایی که تحلیلشان کامل شد
+    let drafted = 0; // تعداد پیام‌هایی که پیش‌نویس شد
     try {
       for (let i = 0; i < MAX_STEPS; i++) {
         const res = await api<{
@@ -442,11 +559,21 @@ export function Studio() {
           // جدول را در حین کار به‌روز نگه دار تا پیشرفت دیده شود
           await loadLeads(selectedId).catch(() => {});
         }
+
+        // پیام پیش‌نویس شد (فاز ۴) — لید واجد شرایط بوده و متن آماده است
+        if (res.step.ran === "message") {
+          drafted++;
+          setTaskStatus(
+            `برای «${res.businessName ?? "لید"}» پیش‌نویس پیام ساخته شد و در بخش پیام‌ها منتظر تأیید توست. در حال ادامه…`
+          );
+          await loadMessages(selectedId).catch(() => {});
+        }
       }
 
       await loadLeads(selectedId);
+      await loadMessages(selectedId).catch(() => {});
       setTaskStatus(
-        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد. جدول لیدها به‌روزرسانی شد.`
+        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. جدول لیدها و بخش پیام‌ها به‌روزرسانی شد.`
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -459,6 +586,70 @@ export function Studio() {
       await loadLeads(selectedId).catch(() => {});
     } finally {
       setBatchRunning(false);
+    }
+  }
+
+  /* ── عملیات پیام (فاز ۴ — تأیید انسانی اجباری) ─────────── */
+
+  /** ذخیره‌ی متن ویرایش‌شده؛ سرور دوباره نگهبان سیاست را روی متن جدید اجرا می‌کند */
+  async function saveEdit(m: MessageView) {
+    const text = (drafts[m.id] ?? currentText(m)).trim();
+    if (!text) {
+      setCardError((p) => ({ ...p, [m.id]: "متن پیام نمی‌تواند خالی باشد." }));
+      return;
+    }
+    setMsgBusyId(m.id);
+    setCardError((p) => ({ ...p, [m.id]: "" }));
+    try {
+      await api("/api/messages", {
+        method: "PATCH",
+        body: JSON.stringify({ id: m.id, action: "edit", text }),
+      });
+      if (selectedId) await loadMessages(selectedId);
+      setDrafts((p) => {
+        const next = { ...p };
+        delete next[m.id];
+        return next;
+      });
+      setSavedAt((p) => ({ ...p, [m.id]: "ذخیره شد" }));
+      setTaskStatus(
+        `متن پیام «${m.businessName}» ذخیره و دوباره توسط نگهبان سیاست بررسی شد. نتیجه‌ی جدید در همین کارت آمده است.`
+      );
+    } catch (e) {
+      setCardError((p) => ({ ...p, [m.id]: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setMsgBusyId(null);
+    }
+  }
+
+  /** تأیید / رد / ثبت ارسال — همیشه پس از یک گام تأیید دوم (بدون confirm مرورگر) */
+  async function runAction(m: MessageView, action: "approve" | "reject" | "sent") {
+    const key = `${m.id}:${action}`;
+    setMsgBusyId(m.id);
+    setCardError((p) => ({ ...p, [m.id]: "" }));
+    try {
+      await api("/api/messages", {
+        method: "PATCH",
+        body: JSON.stringify({ id: m.id, action }),
+      });
+      setArmed(null);
+      if (selectedId) {
+        await loadMessages(selectedId);
+        await loadLeads(selectedId).catch(() => {});
+      }
+      setTaskStatus(
+        action === "approve"
+          ? `پیام «${m.businessName}» تأیید شد. حالا می‌توانی متن را کپی کنی، نمونه‌کارها را اتچ کنی و بعد از ارسال، «ثبت ارسال» را بزنی.`
+          : action === "reject"
+            ? `پیام «${m.businessName}» رد شد و ارسال نمی‌شود.`
+            : `ارسال پیام «${m.businessName}» ثبت شد.`
+      );
+    } catch (e) {
+      setCardError((p) => ({ ...p, [m.id]: e instanceof Error ? e.message : String(e) }));
+      setArmed(null);
+    } finally {
+      setMsgBusyId(null);
+      actionRefs.current[key]?.focus(); // فوکوس به دکمه‌ی آغازگر برمی‌گردد
     }
   }
 
@@ -544,16 +735,28 @@ export function Studio() {
     }
   }
 
+  /* ── مقادیر مشتق‌شده‌ی پیام‌ها ─────────────────────────── */
+  const visibleMessages = msgFilter === "all" ? messages : messages.filter((m) => m.status === msgFilter);
+  const blockedCount = messages.filter((m) => m.policy.verdict === "BLOCK").length;
+  const reviewCount = messages.filter((m) => m.policy.verdict === "HUMAN_REVIEW").length;
+  const readyCount = messages.filter(
+    (m) => m.status === "draft" && m.policy.verdict === "PASS"
+  ).length;
+
   return (
     <div className="space-y-10">
-      {/* کانال اعلان کارهای پس‌زمینه (تحلیل) — همیشه رندر می‌شود */}
+      {/* کانال اعلان کارهای پس‌زمینه — همیشه رندر؛ key باعث اعلام پیام تکراری می‌شود */}
       <div role="status" className="sr-only">
-        {taskStatus}
+        <span key={taskStatusState.n}>{taskStatusState.text}</span>
       </div>
 
-      {/* توضیح مشترک دلیل غیرفعال‌بودن دکمه‌های ردیف هنگام تحلیل گروهی */}
+      {/* توضیح‌های مشترک sr-only (دلیل غیرفعال‌بودن دکمه‌ها) */}
       <span id="batch-block-note" className="sr-only">
         {batchRunning ? "تحلیل گروهی در حال اجراست؛ تا پایان آن این دکمه غیرفعال است." : ""}
+      </span>
+      <span id="policy-block-note" className="sr-only">
+        نگهبان سیاست این پیام را مسدود کرده است؛ سرور تأیید آن را نمی‌پذیرد. ابتدا متن را ویرایش و
+        ذخیره کنید تا دوباره بررسی شود.
       </span>
 
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
@@ -947,6 +1150,379 @@ export function Studio() {
               </tbody>
             </table>
           </div>
+        )}
+      </section>
+
+      {/* ── پیام‌ها (تأیید انسانی — فاز ۴) ── */}
+      <section aria-labelledby="messages-heading">
+        <h2 id="messages-heading" className="mb-2 text-lg font-extrabold text-ink">
+          پیام‌ها ({fa(messages.length)})
+        </h2>
+
+        {/* خلاصه‌ی ماندگار — نه اعلان زنده؛ همیشه قابل‌مرور با screen reader */}
+        <p className="mb-4 text-xs leading-6 text-ink-muted">
+          هیچ پیامی خودکار ارسال نمی‌شود. هر پیام پیش‌نویس است و تا وقتی خودت تأیید نکنی جایی نمی‌رود.
+          {messages.length > 0 && (
+            <>
+              {" "}
+              از {fa(messages.length)} پیام: {fa(blockedCount)} مسدود توسط نگهبان سیاست،{" "}
+              {fa(reviewCount)} نیازمند بازبینی، {fa(readyCount)} آماده‌ی تأیید.
+            </>
+          )}
+        </p>
+
+        {messages.length > 0 && (
+          <fieldset className="mb-4 rounded-xl border border-surface-line bg-surface p-4">
+            <legend className="px-1 text-sm font-medium text-ink">نمایش کدام پیام‌ها</legend>
+            <div className="flex flex-wrap gap-4">
+              {MSG_FILTERS.map((f) => (
+                <span key={f.id} className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    id={`msg-filter-${f.id}`}
+                    name="msg-filter"
+                    value={f.id}
+                    checked={msgFilter === f.id}
+                    onChange={() => setMsgFilter(f.id)}
+                    className="h-4 w-4 accent-brand-600"
+                  />
+                  <label htmlFor={`msg-filter-${f.id}`} className="text-sm text-ink">
+                    {f.label}
+                  </label>
+                </span>
+              ))}
+            </div>
+          </fieldset>
+        )}
+
+        {visibleMessages.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-surface-line bg-surface-dim p-6 text-center text-sm text-ink-muted">
+            {messages.length === 0
+              ? "هنوز پیامی ساخته نشده. لیدها را تحلیل کن؛ برای لیدهای واجد شرایط (امتیاز ۷۰ به بالا) پیش‌نویس پیام ساخته می‌شود."
+              : "با این فیلتر پیامی نیست. فیلتر را روی «همه» بگذار."}
+          </p>
+        ) : (
+          <ul className="space-y-5">
+            {visibleMessages.map((m) => {
+              const text = drafts[m.id] ?? currentText(m);
+              const dirty = text !== currentText(m);
+              const words = wordCount(text);
+              const blocked = m.policy.verdict === "BLOCK";
+              const passed = m.policy.checks.filter((c) => c.pass).length;
+              const busyHere = msgBusyId === m.id;
+              const isArmed = (a: "approve" | "reject") => armed?.id === m.id && armed.action === a;
+
+              return (
+                <li key={m.id}>
+                  <article
+                    aria-labelledby={`msg-h-${m.id}`}
+                    className="rounded-xl border border-surface-line bg-surface p-5 shadow-card"
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape" && armed?.id === m.id) {
+                        e.stopPropagation();
+                        disarm();
+                      }
+                    }}
+                  >
+                    {/* عنوان کارت: هرچه برای تصمیم لازم است در خود متن عنوان */}
+                    <h3 id={`msg-h-${m.id}`} className="text-base font-extrabold leading-7 text-ink">
+                      {m.businessName} — کانال: {m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "نامشخص"} —
+                      وضعیت: {MSG_STATUS_LABELS[m.status]} — {VERDICT_LABELS[m.policy.verdict]}
+                    </h3>
+
+                    <p className="mt-1 text-xs text-ink-muted">
+                      نمره‌ی منتقد:{" "}
+                      {m.criticScore != null ? (
+                        <>
+                          <bdi>{fa(m.criticScore)}</bdi> از ۱۰۰ — {scoreBand(m.criticScore)}
+                        </>
+                      ) : (
+                        scoreBand(null)
+                      )}
+                      {m.painTargeted && <> · درد هدف‌گرفته‌شده: {m.painTargeted}</>}
+                    </p>
+
+                    {/* بررسی‌های نگهبان سیاست — کد قطعی، صفر توکن */}
+                    <h4 id={`pol-h-${m.id}`} className="mt-4 text-sm font-extrabold text-ink">
+                      نگهبان سیاست — {fa(passed)} از {fa(m.policy.checks.length)} بررسی قبول شد
+                    </h4>
+                    <dl aria-labelledby={`pol-h-${m.id}`} className="mt-2 space-y-1">
+                      {m.policy.checks.map((c) => (
+                        <div key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                          <dt className="font-medium text-ink">
+                            <span aria-hidden="true" className={c.pass ? "text-success" : "text-danger"}>
+                              {c.pass ? "✓ " : "✕ "}
+                            </span>
+                            {c.label}:
+                          </dt>
+                          <dd className={c.pass ? "text-ink-muted" : "text-danger"}>
+                            {c.pass ? "قبول" : "رد"} — {c.detail}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+
+                    {/* متن پیام — قابل ویرایش */}
+                    <div className="mt-4">
+                      <label htmlFor={`msg-text-${m.id}`} className="text-sm font-medium text-ink">
+                        متن پیام برای {m.businessName}
+                      </label>
+                      <textarea
+                        id={`msg-text-${m.id}`}
+                        value={text}
+                        aria-describedby={`msg-meta-${m.id}`}
+                        onChange={(e) => setDrafts((p) => ({ ...p, [m.id]: e.target.value }))}
+                        rows={7}
+                        className="mt-2 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm leading-7 text-ink"
+                      />
+                      {/* وضعیت ماندگار (نه live region) — با aria-describedby خوانده می‌شود */}
+                      <p id={`msg-meta-${m.id}`} className="mt-1 text-xs text-ink-muted">
+                        {fa(words)} کلمه (مجاز: {fa(MESSAGE_RULES.minWords)} تا {fa(MESSAGE_RULES.maxWords)}).{" "}
+                        {dirty
+                          ? "تغییرات ذخیره نشده است؛ دکمه‌ی «ذخیره‌ی متن» را بزن."
+                          : savedAt[m.id]
+                            ? "آخرین تغییر ذخیره شده است."
+                            : "متن تغییری نکرده است."}
+                      </p>
+                    </div>
+
+                    {/* نسخه‌ی ایمیلی — disclosure، همیشه رندر و فقط hidden جابه‌جا می‌شود */}
+                    {m.emailText && (
+                      <div className="mt-4">
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            emailTriggerRefs.current[m.id] = el;
+                          }}
+                          aria-expanded={openEmailId === m.id}
+                          aria-controls={`msg-email-${m.id}`}
+                          onClick={() => {
+                            if (openEmailId === m.id) {
+                              setOpenEmailId(null);
+                              emailTriggerRefs.current[m.id]?.focus();
+                            } else {
+                              setOpenEmailId(m.id);
+                            }
+                          }}
+                          className="rounded-lg border border-surface-line bg-surface-dim px-3 py-2 text-sm font-medium text-ink hover:bg-surface"
+                        >
+                          نسخه‌ی ایمیلی {m.businessName}
+                        </button>
+                        <div
+                          id={`msg-email-${m.id}`}
+                          hidden={openEmailId !== m.id}
+                          className="mt-2 rounded-lg border border-surface-line bg-surface-dim p-3"
+                        >
+                          <p className="text-sm font-bold text-ink">موضوع: {m.emailSubject ?? "—"}</p>
+                          <p className="mt-2 whitespace-pre-line text-sm leading-7 text-ink-muted">
+                            {m.emailText}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* نمونه‌کارهای پیشنهادی — اتچ دستی توسط خودت */}
+                    {m.portfolio.length > 0 && (
+                      <div className="mt-4">
+                        <h4 id={`pf-h-${m.id}`} className="text-sm font-extrabold text-ink">
+                          نمونه‌کارهای پیشنهادی برای اتچ دستی
+                        </h4>
+                        <ul aria-labelledby={`pf-h-${m.id}`} className="mt-1 space-y-1">
+                          {m.portfolio.map((p) => (
+                            <li key={p.id} className="text-sm">
+                              <a
+                                href={p.publicUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-brand-700 underline underline-offset-2 hover:text-brand-600"
+                              >
+                                {p.title}
+                                <span className="sr-only">
+                                  {" "}
+                                  — نمونه‌کار پیشنهادی برای {m.businessName} (در تب جدید باز می‌شود)
+                                </span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {cardError[m.id] && (
+                      <p
+                        role="alert"
+                        className="mt-4 rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger"
+                      >
+                        {cardError[m.id]}
+                      </p>
+                    )}
+
+                    {/* عملیات */}
+                    <div
+                      role="group"
+                      aria-label={`عملیات پیام ${m.businessName}`}
+                      className="mt-4 flex flex-wrap gap-3"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (busyHere || !dirty) return;
+                          void saveEdit(m);
+                        }}
+                        aria-disabled={busyHere || !dirty}
+                        aria-label={`ذخیره‌ی متن پیام ${m.businessName}`}
+                        className={
+                          busyHere || !dirty
+                            ? "rounded-lg bg-surface-dim px-4 py-2 text-sm font-bold text-ink-muted"
+                            : "rounded-lg bg-pine px-4 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
+                        }
+                      >
+                        ذخیره‌ی متن
+                      </button>
+
+                      {m.status === "draft" && (
+                        <>
+                          <button
+                            type="button"
+                            ref={(el) => {
+                              actionRefs.current[`${m.id}:approve`] = el;
+                            }}
+                            onClick={() => {
+                              if (blocked || busyHere) return;
+                              setArmed({ id: m.id, action: "approve" });
+                            }}
+                            aria-disabled={blocked || busyHere}
+                            aria-describedby={blocked ? "policy-block-note" : undefined}
+                            aria-expanded={isArmed("approve")}
+                            aria-controls={`confirm-approve-${m.id}`}
+                            aria-label={`تأیید پیام ${m.businessName}`}
+                            className={
+                              blocked || busyHere
+                                ? "rounded-lg bg-surface-dim px-4 py-2 text-sm font-bold text-ink-muted"
+                                : "rounded-lg bg-brand-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
+                            }
+                          >
+                            تأیید پیام
+                          </button>
+
+                          <button
+                            type="button"
+                            ref={(el) => {
+                              actionRefs.current[`${m.id}:reject`] = el;
+                            }}
+                            onClick={() => {
+                              if (busyHere) return;
+                              setArmed({ id: m.id, action: "reject" });
+                            }}
+                            aria-disabled={busyHere}
+                            aria-expanded={isArmed("reject")}
+                            aria-controls={`confirm-reject-${m.id}`}
+                            aria-label={`رد پیام ${m.businessName}`}
+                            className="rounded-lg border border-danger/40 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
+                          >
+                            رد پیام
+                          </button>
+                        </>
+                      )}
+
+                      {m.status === "approved" && (
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            actionRefs.current[`${m.id}:sent`] = el;
+                          }}
+                          onClick={() => {
+                            if (busyHere) return;
+                            void runAction(m, "sent");
+                          }}
+                          aria-disabled={busyHere}
+                          aria-label={`ثبت ارسال پیام ${m.businessName}`}
+                          className="rounded-lg bg-pine px-4 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
+                        >
+                          ثبت ارسال (خودم فرستادم)
+                        </button>
+                      )}
+
+                    </div>
+
+                    {m.status === "draft" && (
+                      <p className="mt-2 text-xs text-ink-muted">
+                        دکمه‌ی «ثبت ارسال» بعد از تأیید همین پیام در این کارت ظاهر می‌شود.
+                      </p>
+                    )}
+
+                    {/* تأیید دوم — درجا، بدون مودال و بدون confirm مرورگر */}
+                    <div
+                      id={`confirm-approve-${m.id}`}
+                      hidden={!isArmed("approve")}
+                      className="mt-3 rounded-lg border border-brand-300 bg-brand-50 p-3"
+                    >
+                      <p className="text-sm text-ink">
+                        تأیید نهایی: پیام «{m.businessName}» تأیید شود؟ پس از تأیید، خودت آن را در{" "}
+                        {m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "کانال انتخابی"} می‌فرستی.
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            confirmRefs.current[`${m.id}:approve`] = el;
+                          }}
+                          onClick={() => {
+                            if (busyHere) return;
+                            void runAction(m, "approve");
+                          }}
+                          aria-disabled={busyHere}
+                          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-bold text-white hover:bg-brand-700"
+                        >
+                          {busyHere ? "در حال تأیید…" : `بله، پیام ${m.businessName} را تأیید کن`}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={disarm}
+                          className="rounded-lg border border-surface-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
+                        >
+                          انصراف
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      id={`confirm-reject-${m.id}`}
+                      hidden={!isArmed("reject")}
+                      className="mt-3 rounded-lg border border-danger/40 bg-danger-soft p-3"
+                    >
+                      <p className="text-sm text-ink">
+                        تأیید نهایی: پیام «{m.businessName}» رد شود؟ این پیام دیگر ارسال نمی‌شود.
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            confirmRefs.current[`${m.id}:reject`] = el;
+                          }}
+                          onClick={() => {
+                            if (busyHere) return;
+                            void runAction(m, "reject");
+                          }}
+                          aria-disabled={busyHere}
+                          className="rounded-lg bg-danger px-4 py-2 text-sm font-bold text-white"
+                        >
+                          {busyHere ? "در حال رد…" : `بله، پیام ${m.businessName} را رد کن`}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={disarm}
+                          className="rounded-lg border border-surface-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
+                        >
+                          انصراف
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </section>
     </div>

@@ -5,26 +5,43 @@ import { checkPolicy } from "@/lib/agents/policy-guard";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/messages?leadId=&status= — فهرست پیام‌ها (+ نتیجه‌ی Policy Guard) */
+/** GET /api/messages?leadId=&campaignId=&status= — فهرست پیام‌ها (+ نتیجه‌ی Policy Guard) */
 export async function GET(req: NextRequest) {
   if (!isStudioAuthorized(req)) return unauthorized();
 
   const { searchParams } = new URL(req.url);
   const leadId = searchParams.get("leadId") || undefined;
+  const campaignId = searchParams.get("campaignId") || undefined;
   const status = (searchParams.get("status") as MessageStatus | null) || undefined;
 
   const store = getStore();
   const messages = await store.listMessages({ leadId, status });
 
-  // برای هر پیام، نام کسب‌وکار و چک سیاست را ضمیمه می‌کنیم (صفر توکن)
+  // فیلتر کمپین: store روی پیام کمپین ندارد، پس از روی لیدهای کمپین فیلتر می‌کنیم
+  let scoped = messages;
+  if (campaignId) {
+    const leads = await store.listLeads({ campaignId, limit: 1000 });
+    const ids = new Set(leads.map((l) => l.id));
+    scoped = messages.filter((m) => ids.has(m.leadId));
+  }
+
+  // مخزن نمونه‌کار یک‌بار خوانده می‌شود (نه به‌ازای هر پیام)
+  const portfolio = await store.listPortfolio();
+  const byId = new Map(portfolio.map((p) => [p.id, p]));
+
+  // برای هر پیام، نام کسب‌وکار، نمونه‌کارهای پیشنهادی و چک سیاست را ضمیمه می‌کنیم (صفر توکن)
   const enriched = await Promise.all(
-    messages.map(async (m) => {
+    scoped.map(async (m) => {
       const lead = await store.getLead(m.leadId);
       const text = m.finalText ?? m.draftText;
       return {
         ...m,
         businessName: lead?.businessName ?? "—",
         contactChannels: lead?.contactChannels ?? {},
+        portfolio: m.recommendedPortfolioIds
+          .map((id) => byId.get(id))
+          .filter((p): p is NonNullable<typeof p> => Boolean(p))
+          .map((p) => ({ id: p.id, title: p.title, publicUrl: p.publicUrl, service: p.service })),
         policy: checkPolicy(text, { businessName: lead?.businessName }),
       };
     })

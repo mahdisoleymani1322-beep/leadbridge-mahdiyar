@@ -41,20 +41,29 @@ export async function POST(req: NextRequest) {
     if (typeof body.campaignId === "string" && body.campaignId) {
       const store = getStore();
 
-      // لید در حال پردازش (SCORED = تحلیل شده ولی گام‌های بعدی مانده) اولویت دارد،
-      // تا کار نیمه‌تمام رها نشود؛ بعد سراغ لید تحلیل‌نشده‌ی بعدی می‌رویم.
-      const inProgress = await store.listLeads({
+      // لیدهای نیمه‌تمام اولویت دارند تا کار رهاشده نماند:
+      //   SCORED            → گام خدمت/نمونه‌کار مانده
+      //   READY_FOR_MESSAGE → گام تولید پیام مانده (فاز ۴)
+      // بعد سراغ لید تحلیل‌نشده‌ی بعدی می‌رویم.
+      const scored = await store.listLeads({
         campaignId: body.campaignId,
         status: "SCORED",
         limit: 1,
       });
+      const readyForMessage = scored.length
+        ? []
+        : await store.listLeads({
+            campaignId: body.campaignId,
+            status: "READY_FOR_MESSAGE",
+            limit: 1,
+          });
       const fresh = await store.listLeads({
         campaignId: body.campaignId,
         status: "NEW",
         limit: 500,
       });
 
-      const target = inProgress[0] ?? fresh[0];
+      const target = scored[0] ?? readyForMessage[0] ?? fresh[0];
       if (!target) {
         return Response.json({ step: null, remaining: 0, done: true });
       }
