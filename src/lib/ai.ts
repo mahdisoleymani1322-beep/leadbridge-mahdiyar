@@ -142,8 +142,15 @@ function extractJson(text: string): string {
 }
 
 export type AgentJSONOptions<T> = AgentCallOptions & {
-  /** اسکیمای Zod برای اعتبارسنجی خروجی */
-  schema: z.ZodType<T>;
+  /**
+   * اسکیمای Zod برای اعتبارسنجی خروجی.
+   *
+   * ورودی عمداً `unknown` است (نه `T`): با `.default()` نوع ورودی و خروجی
+   * اسکیما یکی نیستند — فیلدِ دارای default در ورودی اختیاری و در خروجی
+   * قطعی است. اگر ورودی را به `T` گره بزنیم، TypeScript همان فیلد را در
+   * خروجی هم اختیاری می‌بیند و هر مصرف‌کننده باید بی‌دلیل چکِ undefined بزند.
+   */
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>;
   /** نمونه‌ی شکل خروجی که داخل پرامپت به مدل نشان داده می‌شود */
   shapeHint: string;
 };

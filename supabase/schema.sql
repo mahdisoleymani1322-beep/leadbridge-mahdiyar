@@ -40,6 +40,13 @@ create table if not exists leads (
                       'MESSAGE_REVIEW','APPROVED','SENT','REPLIED','HANDOVER_READY','HANDED_OVER')),
   score             int,
   confidence        real,
+  -- تخمین توان مالی از نشانه‌های عمومی (agents/affluence.ts) — فقط برای
+  -- اولویت‌بندی صف کار؛ هرگز وارد متن پیام نمی‌شود.
+  affluence_score   int,
+  affluence_signals jsonb not null default '[]',
+  -- یافته‌ی دستی بررسی پیج اینستاگرام (تا وقتی IG_ACCESS_TOKEN ست نشده)
+  ig_note           text,
+  ig_note_at        timestamptz,
   do_not_contact    boolean not null default false,
   -- کلید یکتاسازی برای حذف تکراری قطعی (place_id یا تلفن نرمال‌شده)
   dedup_key         text not null unique,

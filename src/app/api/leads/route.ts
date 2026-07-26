@@ -77,6 +77,11 @@ function buildManualLead(raw: any, campaignId: string | null): Lead | null {
     status: "NEW",
     score: null,
     confidence: null,
+    // توان مالی هنگام کشف/تحلیل محاسبه می‌شود، نه هنگام افزودن دستی
+    affluenceScore: null,
+    affluenceSignals: [],
+    igNote: null,
+    igNoteAt: null,
     doNotContact: false,
     dedupKey,
     createdAt: now,

@@ -59,6 +59,12 @@ function factsBlock(input: LeadAnalysisInput): string {
     );
   }
 
+  // یافته‌ی دستی — تا وقتی توکن اینستاگرام ست نشده، این تنها منبع مشاهده‌ی
+  // واقعی پیج است. برای مدل به‌اندازه‌ی داده‌ی خودکار معتبر است.
+  if (l.igNote) {
+    lines.push(`— بررسی دستی پیج اینستاگرام (مشاهده‌ی قطعی) —`, l.igNote.slice(0, 600));
+  }
+
   return lines.join("\n");
 }
 

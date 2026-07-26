@@ -26,7 +26,14 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
 
   try {
-    // حالت تکی
+    // حالت تکی — **یک گام** در هر درخواست (برای دکمه‌ی «تولید پیام اختصاصی»).
+    // مثل حالت کمپین، کلاینت گام‌ها را پشت‌سرهم می‌زند تا از سقف ۶۰ ثانیه رد نشود.
+    if (typeof body.leadId === "string" && body.leadId && body.step === true) {
+      const step = await runLeadStep(body.leadId);
+      return Response.json({ step, done: step.done });
+    }
+
+    // حالت تکی — اجرای کامل تحلیل تا انتخاب نمونه‌کار (بدون گام پیام)
     if (typeof body.leadId === "string" && body.leadId) {
       const result = await runLeadPipeline(body.leadId);
       return Response.json({ results: [result] });
@@ -40,6 +47,30 @@ export async function POST(req: NextRequest) {
     // پشت‌سرهم می‌زند تا همه‌ی لیدها تمام شوند.
     if (typeof body.campaignId === "string" && body.campaignId) {
       const store = getStore();
+
+      // حالت «فقط پیام»: دکمه‌ی «تولید پیام برای همه‌ی لیدها» فقط لیدهایی را
+      // هدف می‌گیرد که تحلیل و امتیازدهی شده‌اند و منتظر پیام‌اند — تا با
+      // دکمه‌ی تحلیل گروهی تداخل نکند و سهمیه‌ی مدل صرف تحلیل نشود.
+      const onlyMessage = body.only === "message";
+
+      if (onlyMessage) {
+        const waiting = await store.listLeads({
+          campaignId: body.campaignId,
+          status: "READY_FOR_MESSAGE",
+          limit: 500,
+        });
+        const target = waiting[0];
+        if (!target) return Response.json({ step: null, remaining: 0, done: true });
+
+        const step = await runLeadStep(target.id);
+        return Response.json({
+          step,
+          businessName: target.businessName,
+          // این لید تا وقتی done نشود همان‌جا می‌ماند، پس شمارش بعد از اتمامش کم می‌شود
+          remaining: step.done ? waiting.length - 1 : waiting.length,
+          done: false,
+        });
+      }
 
       // لیدهای نیمه‌تمام اولویت دارند تا کار رهاشده نماند:
       //   SCORED            → گام خدمت/نمونه‌کار مانده

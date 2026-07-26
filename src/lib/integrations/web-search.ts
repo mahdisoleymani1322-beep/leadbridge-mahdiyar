@@ -135,37 +135,84 @@ async function tavilySearch(query: string, maxResults: number): Promise<unknown[
   }
 }
 
+/** سه الگوی کوئری — هر کدام نوع متفاوتی از نتیجه می‌آورد */
+const QUERY_PATTERNS: ((term: string, city: string) => string)[] = [
+  (t, c) => `${t} ${c} اینستاگرام`, // پیج‌های بیزینس
+  (t, c) => `${t} ${c} سایت رسمی`, // سایت اختصاصی (سیگنال توان مالی)
+  (t, c) => `بهترین ${t} ${c}`, // فهرست‌های شناخته‌شده‌ی صنف
+];
+
+/**
+ * عبارت‌ها را طوری می‌چیند که **از هر بازار سهم برسد**.
+ *
+ * باگی که این رفع می‌کند: قبلاً `queryTerms.slice(0, 3)` بود و چون
+ * `combinedQueryTerms()` بازارها را به‌ترتیب اولویت پشت‌سرهم می‌چیند، در حالت
+ * «همه‌ی بازارها» هر سه عبارت همیشه از بازار «کارخانه» می‌آمد — کلینیک زیبایی
+ * و بقیه هرگز جست‌وجوی وب نمی‌شدند.
+ *
+ * @param terms عبارت‌ها به‌ترتیب بازار (خروجی combinedQueryTerms)
+ * @param groupSize چند عبارت در هر بازار (برای چرخش round-robin)
+ */
+export function interleaveTerms(terms: string[], groupSize = 4): string[] {
+  if (terms.length <= groupSize) return terms;
+  const out: string[] = [];
+  for (let i = 0; i < groupSize; i++) {
+    for (let start = 0; start < terms.length; start += groupSize) {
+      const t = terms[start + i];
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+
+export type WebSearchResult = {
+  places: DiscoveredPlace[];
+  /** چند فراخوان Tavily واقعاً مصرف شد (شفافیت سهمیه‌ی رایگان) */
+  searchesUsed: number;
+};
+
 /**
  * کسب‌وکارها را با جست‌وجوی وب (Tavily) پیدا می‌کند.
- * best-effort: در صورت نبود کلید یا خطا، آرایه‌ی خالی برمی‌گرداند تا کشف نشکند.
+ * best-effort: در صورت نبود کلید یا خطا، نتیجه‌ی خالی برمی‌گرداند تا کشف نشکند.
  */
 export async function discoverViaWebSearch(
   queryTerms: string[],
   city: string,
   limit: number
-): Promise<DiscoveredPlace[]> {
-  if (!isWebSearchConfigured() || queryTerms.length === 0) return [];
+): Promise<WebSearchResult> {
+  if (!isWebSearchConfigured() || queryTerms.length === 0) {
+    return { places: [], searchesUsed: 0 };
+  }
 
   // گاردریل: سقف لیدها = کمینه‌ی (limit خواسته‌شده، سقف پیکربندی)
   const leadCap = Math.min(limit, WEB_SEARCH.maxLeadsPerRun);
   const out: DiscoveredPlace[] = [];
   const seen = new Set<string>();
+  let searchesUsed = 0;
 
-  // گاردریل مصرف: حداکثر maxSearchesPerRun فراخوان Tavily در هر کشف — بدون توجه
-  // به تعداد عبارت‌های بازار (حتی در حالت «همه‌ی بازارها» با کوئری‌های زیاد).
-  const terms = queryTerms.slice(0, WEB_SEARCH.maxSearchesPerRun);
-  for (const term of terms) {
-    if (out.length >= leadCap) break;
-    const query = `${term} ${city} اینستاگرام`;
-    const results = await tavilySearch(query, WEB_SEARCH.maxResultsPerSearch);
-    for (const r of results) {
-      const place = resultToPlace(r);
-      if (place && !seen.has(place.placeId)) {
-        seen.add(place.placeId);
-        out.push(place);
-        if (out.length >= leadCap) break;
+  // عبارت‌ها چرخشی می‌شوند تا سهم همه‌ی بازارها برسد
+  const terms = interleaveTerms(queryTerms);
+
+  // گاردریل مصرف: حداکثر maxSearchesPerRun فراخوان Tavily در هر کشف.
+  // ترتیب حلقه‌ها مهم است: اول همه‌ی عبارت‌ها با الگوی ۱، بعد الگوی ۲ — تا اگر
+  // بودجه وسط کار تمام شد، دست‌کم یک جست‌وجو برای هر بازار انجام شده باشد.
+  outer: for (const pattern of QUERY_PATTERNS) {
+    for (const term of terms) {
+      if (searchesUsed >= WEB_SEARCH.maxSearchesPerRun) break outer;
+      if (out.length >= leadCap) break outer;
+
+      searchesUsed++;
+      const results = await tavilySearch(pattern(term, city), WEB_SEARCH.maxResultsPerSearch);
+      for (const r of results) {
+        const place = resultToPlace(r);
+        if (place && !seen.has(place.placeId)) {
+          seen.add(place.placeId);
+          out.push(place);
+          if (out.length >= leadCap) break;
+        }
       }
     }
   }
-  return out;
+
+  return { places: out, searchesUsed };
 }

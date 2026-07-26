@@ -29,3 +29,6 @@ next-env.d.ts
 *.json.tmp
 tscout.txt
 pick*.txt
+
+# بسته‌ی skill نامرتبط با پروژه (ابزار محلی)
+*.skill

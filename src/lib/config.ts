@@ -110,19 +110,21 @@ export const LIMITS = {
 /* ── گاردریل جست‌وجوی وب (Tavily) ──────────────────────────── */
 
 /**
- * Tavily کوتای رایگان محدودی دارد (~۱۰۰۰ جست‌وجو/ماه). پس در هر «کشف لید»
- * استفاده می‌شود ولی با سقف‌های سخت تا مصرف بهینه بماند:
+ * Tavily کوتای رایگان محدودی دارد (~۱۰۰۰ اعتبار/ماه؛ advanced = ۲ اعتبار).
+ * حالت «متوسط» انتخاب مالک: ~۲۰ اعتبار در هر کشف → حدود ۵۰ کشف در ماه.
+ *
  * - maxSearchesPerRun: حداکثر فراخوان Tavily در هر دکمه‌ی کشف (نه به‌ازای هر عبارت).
- * - maxResultsPerSearch: نتایج هر فراخوان (کمتر = ارزان‌تر).
+ * - maxResultsPerSearch: نتایج هر فراخوان.
  * - maxLeadsPerRun: سقف لیدهای وب که به نتیجه اضافه می‌شود.
- * - searchDepth: "basic" (ارزان‌تر و کافی؛ "advanced" گران‌تر است).
- * تخمین مصرف: هر کشف حداکثر ۳ جست‌وجو → ~۳۳۰ کشف در ماه با پلن رایگان.
+ * - searchDepth: "advanced" — نتایج غنی‌تر و دقیق‌تر (۲ اعتبار به‌جای ۱).
+ * - enrichTopLeads: چند لید برترِ توان مالی برای جست‌وجوی غنی‌سازی جدا شوند.
  */
 export const WEB_SEARCH = {
-  maxSearchesPerRun: 3,
-  maxResultsPerSearch: 6,
-  maxLeadsPerRun: 12,
-  searchDepth: "basic" as const,
+  maxSearchesPerRun: 8,
+  maxResultsPerSearch: 10,
+  maxLeadsPerRun: 25,
+  searchDepth: "advanced" as const,
+  enrichTopLeads: 2,
 } as const;
 
 /* ── امتیازدهی لید (۷ معیار وزنی — نقشه‌راه §11.4) ─────────── */
@@ -174,12 +176,50 @@ export const MAX_REVISION_ROUNDS = 2;
  */
 export const MAX_STEPS_PER_LEAD = 10;
 
-/* ── قواعد پیام (نقشه‌راه §22) ─────────────────────────────── */
+/* ── قواعد پیام (نقشه‌راه §22 + دستور پیام‌نویسی مالک) ─────── */
 
-export const MESSAGE_RULES = {
-  minWords: 80,
-  maxWords: 120,
-} as const;
+/**
+ * طول پیام **تابع کانال** است، نه یک عدد ثابت.
+ *
+ * چرا: دایرکت اینستاگرام جای پیام کوتاه است و متن ۱۲۰ کلمه‌ای آنجا خوانده
+ * نمی‌شود؛ ایمیل برعکس، جا برای توضیح دارد. عدد ثابت قبلی (۸۰–۱۲۰) باعث
+ * می‌شد نویسنده پیام دایرکت را بی‌دلیل کش بدهد.
+ *
+ * این‌ها **سقف قطعی نیستند**: کوتاه‌ترین نسخه‌ای که منظور را کامل می‌رساند
+ * بهتر است. Policy Guard فقط خارج‌از‌بازه‌بودن را به‌عنوان هشدار ثبت می‌کند،
+ * نه به‌عنوان BLOCK.
+ */
+export const MESSAGE_LENGTH_BY_CHANNEL: Record<ChannelKey | "email", { min: number; max: number }> = {
+  instagram: { min: 50, max: 90 },
+  whatsapp: { min: 60, max: 110 },
+  telegram: { min: 60, max: 110 },
+  siteForm: { min: 60, max: 110 },
+  phone: { min: 60, max: 110 },
+  email: { min: 80, max: 140 },
+};
+
+/** بازه‌ی طول برای یک کانال (اگر کانال نامشخص بود، حالت میانه) */
+export function messageLengthFor(channel: ChannelKey | "email" | null): { min: number; max: number } {
+  return (channel && MESSAGE_LENGTH_BY_CHANNEL[channel]) || { min: 60, max: 110 };
+}
+
+/**
+ * حداکثر خدمت در یک پیام: ۱ اصلی + تا ۲ مکمل — به‌شرطی که هر سه **یک نتیجه‌ی
+ * مشترک** بدهند. فهرست‌کردن توانایی‌ها ممنوع است.
+ */
+export const MAX_SERVICES_PER_MESSAGE = 3;
+
+/** حداکثر نمونه‌کار پیشنهادی برای اتچ — معمولاً ۱ */
+export const MAX_PORTFOLIO_PER_MESSAGE = 2;
+
+/** ترتیب اولویت انتخاب نمونه‌کار (دستور پیام‌نویسی، بند ۸) */
+export const PORTFOLIO_MATCH_PRIORITY = [
+  "همان صنعت",
+  "مسئله‌ی مشابه",
+  "سبک بصری نزدیک",
+  "نوع خروجی مشابه",
+  "نزدیک‌ترین نمونه‌ی تأییدشده",
+] as const;
 
 /* ── اولویت کانال ارتباط ──────────────────────────────────── */
 

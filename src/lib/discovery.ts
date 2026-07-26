@@ -1,7 +1,14 @@
 import "server-only";
 import { randomUUID } from "crypto";
 import { getStore, type Lead } from "@/lib/store";
-import { getMarket, CHANNEL_PRIORITY, marketLabel, osmTagsFor, queryTermsFor } from "@/lib/config";
+import {
+  getMarket,
+  CHANNEL_PRIORITY,
+  marketLabel,
+  osmTagsFor,
+  queryTermsFor,
+  WEB_SEARCH,
+} from "@/lib/config";
 import { textSearch, isPlacesConfigured } from "@/lib/integrations/google-places";
 import { discoverViaOsm } from "@/lib/integrations/openstreetmap";
 import { discoverViaWebSearch, isWebSearchConfigured } from "@/lib/integrations/web-search";
@@ -9,6 +16,7 @@ import type { DiscoveredPlace } from "@/lib/integrations/types";
 import { extractContactChannels } from "@/lib/integrations/contact-channels";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
 import { computeDedupKey, validateCandidate, type LeadCandidate } from "@/lib/agents/validation";
+import { scoreAffluence } from "@/lib/agents/affluence";
 
 /**
  * جریان کشف لید (کمپین‌محور) — سرویس قطعی، صفر توکن LLM.
@@ -31,6 +39,10 @@ export type DiscoverySummary = {
   duplicates: number;
   invalid: number;
   errors: number;
+  /** چند جست‌وجوی Tavily در این کشف مصرف شد (شفافیت سهمیه‌ی رایگان) */
+  webSearches: number;
+  /** چند لید از جست‌وجوی وب آمد (بقیه از OSM/Google) */
+  webLeads: number;
   leadIds: string[];
 };
 
@@ -55,6 +67,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     duplicates: 0,
     invalid: 0,
     errors: 0,
+    webSearches: 0,
+    webLeads: 0,
     leadIds: [],
   };
 
@@ -86,20 +100,37 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
   // منبع مکمل — جست‌وجوی وب، **در همان دکمه‌ی کشف** (نه دکمه‌ی جدا).
   // فقط اگر TAVILY_API_KEY تنظیم شده باشد؛ نتایج با OSM ترکیب می‌شوند.
   if (isWebSearchConfigured()) {
-    const webPlaces = await discoverViaWebSearch(
+    const web = await discoverViaWebSearch(
       queryTermsFor(campaign.market),
       campaign.city,
-      Math.min(limit, 15)
+      Math.min(limit, WEB_SEARCH.maxLeadsPerRun)
     );
+    summary.webSearches = web.searchesUsed;
     const seenIds = new Set(discovered.map((p) => p.placeId));
-    for (const wp of webPlaces) {
+    for (const wp of web.places) {
       if (!seenIds.has(wp.placeId)) {
         seenIds.add(wp.placeId);
         discovered.push(wp);
+        summary.webLeads++;
       }
     }
   }
   summary.found = discovered.length;
+
+  // ۱-ب) پیش‌مرتب‌سازی بر اساس نشانه‌های توان مالیِ در دسترسِ همین لحظه.
+  //
+  // چرا اینجا و نه بعد از درج: سقف روزانه (limit) پایین‌تر اعمال می‌شود، پس اگر
+  // مرتب نکنیم ممکن است ۲۰ لید ضعیف نگه داریم و گروه صنعتی خوب را دور بریزیم.
+  // این مرتب‌سازی فقط از فیلدهای موجودِ DiscoveredPlace استفاده می‌کند
+  // (تعداد نظر، دامنه)؛ نمره‌ی کامل بعد از استخراج کانال‌ها محاسبه می‌شود.
+  const roughAffluence = (p: DiscoveredPlace) => {
+    let s = 0;
+    s += Math.min(20, (p.reviewsCount ?? 0) / 10);
+    if (p.website) s += 8;
+    if (p.rating != null && p.rating >= 4.3) s += 4;
+    return s;
+  };
+  discovered.sort((a, b) => roughAffluence(b) - roughAffluence(a));
 
   // ۲) استخراج کانال‌ها به‌صورت موازی و دسته‌ای (تا در محیط serverless معلق نماند)
   const igOn = isInstagramConfigured();
@@ -150,6 +181,9 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
   }
 
   // ۳) اعتبارسنجی + حذف تکراری (درون‌اجرا و دیتابیس) + درج — سریالی و سریع
+  //
+  // نام همه‌ی نامزدها لازم است تا affluence بتواند چندشعبه‌ای‌بودن را ببیند.
+  const allNames = prepared.map((x) => x.place.name);
   const seenKeys = new Set<string>();
   for (const { place: p, candidate, extracted } of prepared) {
     const check = validateCandidate(candidate);
@@ -190,11 +224,21 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       status: "NEW",
       score: null,
       confidence: null,
+      affluenceScore: null, // چند خط پایین‌تر محاسبه می‌شود (به خود lead نیاز دارد)
+      affluenceSignals: [],
+      igNote: null,
+      igNoteAt: null,
       doNotContact: false,
       dedupKey,
       createdAt: now,
       updatedAt: now,
     };
+    // تخمین توان مالی — صفر توکن، از همان داده‌ی عمومی که همین حالا داریم.
+    // اینجا محاسبه می‌شود (نه بعداً) تا صف لیدها از همان لحظه‌ی کشف مرتب باشد.
+    const aff = scoreAffluence(lead, { siblingNames: allNames });
+    lead.affluenceScore = aff.score;
+    lead.affluenceSignals = aff.signals;
+
     await store.createLead(lead);
     summary.inserted++;
     summary.leadIds.push(lead.id);
@@ -206,7 +250,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     leadId: null,
     agentName: "discovery",
     status: summary.errors > 0 && summary.inserted === 0 ? "error" : "done",
-    summary: `کشف (${source}) «${summary.query}»: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر`,
+    summary: `کشف (${source}) «${summary.query}»: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر · ${summary.webSearches} جست‌وجوی وب`,
     output: summary,
     tokenInput: 0,
     tokenOutput: 0,

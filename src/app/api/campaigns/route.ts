@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { getStore, type Campaign } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { DEFAULT_CITY, DEFAULT_MARKET_ID, LIMITS, getMarket, isAllMarkets, marketLabel } from "@/lib/config";
-import { SERVICES } from "@/lib/brand";
+import { SERVICES, ALL_SERVICES_ID } from "@/lib/brand";
 
 export const dynamic = "force-dynamic";
 
@@ -24,10 +24,13 @@ export async function POST(req: NextRequest) {
       ? body.market
       : DEFAULT_MARKET_ID;
   const city = typeof body.city === "string" && body.city.trim() ? body.city.trim() : DEFAULT_CITY;
+  // «all» = همه‌ی موارد (پیش‌فرض). این فیلد عمداً بی‌اثر است — service-match
+  // همیشه آزادانه از هر ۷ خدمت انتخاب می‌کند. جزئیات در brand.ALL_SERVICES_ID.
   const primaryService =
-    typeof body.primaryService === "string" && SERVICES.some((s) => s.id === body.primaryService)
+    typeof body.primaryService === "string" &&
+    (body.primaryService === ALL_SERVICES_ID || SERVICES.some((s) => s.id === body.primaryService))
       ? body.primaryService
-      : SERVICES[0].id;
+      : ALL_SERVICES_ID;
   const marketTitle = marketLabel(market);
 
   const campaign: Campaign = {

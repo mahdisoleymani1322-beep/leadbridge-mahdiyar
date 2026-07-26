@@ -1,6 +1,7 @@
 import "server-only";
-import { BANNED_WORDS } from "@/lib/brand";
-import { MESSAGE_RULES } from "@/lib/config";
+import { BANNED_WORDS, CLICHE_PHRASES, FORBIDDEN_CLAIMS } from "@/lib/brand";
+import { messageLengthFor } from "@/lib/config";
+import type { ChannelKey } from "@/lib/store/types";
 
 /**
  * Policy & Safety Guard — **کد قطعی، صفر توکن LLM** (نقشه‌راه §24).
@@ -46,14 +47,29 @@ export function findBannedWords(text: string): string[] {
   return BANNED_WORDS.filter((w) => lower.includes(w.toLowerCase()));
 }
 
+/** ادعای «نمونه‌کار را فرستادم» — دروغ است چون مالک دستی اتچ می‌کند */
+const SENT_PORTFOLIO_RE =
+  /(نمونه[‌\s]?کار|نمونه)[^.،]{0,30}(فرستادم|ارسال کردم|همراه پیام فرستادم|پیوست کردم|ضمیمه کردم)/i;
+
 /**
  * پیام را در برابر قواعد سخت بررسی می‌کند.
- * @param message متن پیام کانال مجازی
- * @param opts businessName برای چک شخصی‌سازی؛ isEmail برای معافیت طول
+ *
+ * @param message متن پیام
+ * @param opts
+ *   - `businessName` برای چک شخصی‌سازی
+ *   - `channel` بازه‌ی طول مجاز را تعیین می‌کند (دایرکت کوتاه‌تر از ایمیل)
+ *   - `isEmail` نسخه‌ی ایمیلی — بازه‌ی خودش را دارد
+ *   - `portfolioMention` وضعیت اعلام‌شده‌ی نمونه‌کار؛ اگر `attached` نباشد،
+ *     ادعای «فرستادم» در متن یک دروغ است و BLOCK می‌شود
  */
 export function checkPolicy(
   message: string,
-  opts: { businessName?: string; isEmail?: boolean } = {}
+  opts: {
+    businessName?: string;
+    isEmail?: boolean;
+    channel?: ChannelKey | null;
+    portfolioMention?: "attached" | "available" | "linked" | "none";
+  } = {}
 ): PolicyResult {
   const checks: PolicyCheck[] = [];
   const violations: string[] = [];
@@ -85,17 +101,71 @@ export function checkPolicy(
     hardBlock = true;
   }
 
-  // ۳) طول پیام (فقط برای پیام کانال مجازی — ایمیل می‌تواند بلندتر باشد)
-  if (!opts.isEmail) {
+  // ۳) طول پیام — **تابع کانال** است، نه یک عدد ثابت.
+  //    زیر حد مجاز ایراد نیست: دستور پیام‌نویسی می‌گوید «کوتاه‌ترین نسخه‌ای که
+  //    منظور را کامل می‌رساند بهتر است». فقط بلندی بیش از حد ثبت می‌شود.
+  {
+    const range = messageLengthFor(opts.isEmail ? "email" : opts.channel ?? null);
     const words = countWords(message);
-    const ok = words >= MESSAGE_RULES.minWords && words <= MESSAGE_RULES.maxWords;
+    const tooLong = words > range.max;
     checks.push({
       id: "length",
-      label: `طول ${MESSAGE_RULES.minWords}–${MESSAGE_RULES.maxWords} کلمه`,
-      pass: ok,
-      detail: `${words} کلمه`,
+      label: `طول متناسب کانال (تا ${range.max} کلمه)`,
+      pass: !tooLong,
+      detail: tooLong
+        ? `${words} کلمه — بیش از حد این کانال`
+        : `${words} کلمه (بازه‌ی پیشنهادی ${range.min}–${range.max})`,
     });
-    if (!ok) violations.push(`طول پیام ${words} کلمه است (مجاز: ${MESSAGE_RULES.minWords}–${MESSAGE_RULES.maxWords})`);
+    if (tooLong) violations.push(`طول پیام ${words} کلمه است (سقف این کانال: ${range.max})`);
+  }
+
+  // ۳-ب) عبارت‌های قالبی — پیام را ماشینی می‌کنند (بند ۱۰ دستور پیام‌نویسی).
+  //      BLOCK نمی‌شوند چون خطای اخلاقی نیستند؛ فقط به بازبینی انسانی می‌روند.
+  {
+    const lower = message.toLowerCase();
+    const found = CLICHE_PHRASES.filter((p) => lower.includes(p.toLowerCase()));
+    checks.push({
+      id: "no-cliche",
+      label: "بدون عبارت‌های قالبی",
+      pass: found.length === 0,
+      detail: found.length ? `یافت شد: ${found.join("، ")}` : "لحن قالبی نیست",
+    });
+    if (found.length) violations.push(`عبارت قالبی: ${found.join("، ")}`);
+  }
+
+  // ۳-ج) جمله‌های ممنوع (بند ۱۸) — تحقیر کسب‌وکار، وعده‌ی نتیجه، فشار برای پاسخ
+  {
+    const lower = message.toLowerCase();
+    const found = FORBIDDEN_CLAIMS.filter((p) => lower.includes(p.toLowerCase()));
+    checks.push({
+      id: "no-forbidden-claims",
+      label: "بدون ادعای ممنوع",
+      pass: found.length === 0,
+      detail: found.length ? `یافت شد: ${found.join("، ")}` : "ادعای ممنوعی نیست",
+    });
+    if (found.length) {
+      violations.push(`ادعای ممنوع: ${found.join("، ")}`);
+      hardBlock = true;
+    }
+  }
+
+  // ۳-د) ادعای دروغِ نمونه‌کار — مالک دستی اتچ می‌کند، پس «فرستادم» دروغ است
+  {
+    const claimsSent = SENT_PORTFOLIO_RE.test(message);
+    const actuallyAttached = opts.portfolioMention === "attached";
+    const lying = claimsSent && !actuallyAttached;
+    checks.push({
+      id: "portfolio-honesty",
+      label: "ادعای درست درباره‌ی نمونه‌کار",
+      pass: !lying,
+      detail: lying
+        ? "متن می‌گوید نمونه‌کار فرستاده شده، ولی چیزی همراه پیام نیست"
+        : "ادعای نادرستی درباره‌ی نمونه‌کار نیست",
+    });
+    if (lying) {
+      violations.push("ادعای دروغ: نمونه‌کار همراه پیام فرستاده نشده است");
+      hardBlock = true;
+    }
   }
 
   // ۴) شخصی‌سازی: نام کسب‌وکار باید در پیام باشد (معیار اصلی پروژه)

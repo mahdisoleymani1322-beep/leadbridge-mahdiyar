@@ -15,10 +15,10 @@ import {
   MARKETS,
   SCORING_WEIGHTS,
   CRITIC_THRESHOLDS,
-  MESSAGE_RULES,
+  messageLengthFor,
   type ScoringCriterion,
 } from "@/lib/config";
-import { SERVICES } from "@/lib/brand";
+import { SERVICES, ALL_SERVICES_ID, MESSAGE_TEMPLATES } from "@/lib/brand";
 
 /** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
 const fa = (n: number | string) => new Intl.NumberFormat("fa-IR").format(Number(n));
@@ -90,21 +90,94 @@ const CHANNEL_LABELS: Record<ChannelKey, string> = {
   phone: "تلفن",
 };
 
-function Channels({ channels }: { channels: ContactChannels }) {
+/** فقط ارقام شماره را نگه می‌دارد (ارقام فارسی/عربی هم به لاتین تبدیل می‌شوند) */
+function digitsOnly(v: string): string {
+  return v
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/\D/g, "");
+}
+
+/** شماره‌ی ایرانی را به فرمت بین‌المللی واتساپ (98…) تبدیل می‌کند */
+function toIntlPhone(v: string): string {
+  const d = digitsOnly(v);
+  if (d.startsWith("98")) return d;
+  if (d.startsWith("0")) return "98" + d.slice(1);
+  if (d.startsWith("9") && d.length === 10) return "98" + d;
+  return d;
+}
+
+/**
+ * لینک عملیاتی هر کانال — با کلیک، همان اپ/صفحه باز می‌شود.
+ * برای تلفن `tel:` است تا روی موبایل شماره‌گیر و روی دسکتاپ شماره ظاهر شود.
+ */
+function channelHref(key: ChannelKey, value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  switch (key) {
+    case "instagram":
+      return `https://instagram.com/${v.replace(/^@/, "").replace(/^https?:\/\/(www\.)?instagram\.com\//i, "")}`;
+    case "whatsapp":
+      return `https://wa.me/${toIntlPhone(v)}`;
+    case "telegram":
+      return v.startsWith("http") ? v : `https://t.me/${v.replace(/^@/, "")}`;
+    case "email":
+      return `mailto:${v}`;
+    case "siteForm":
+      return v.startsWith("http") ? v : `https://${v}`;
+    case "phone":
+      return `tel:${digitsOnly(v)}`;
+    default:
+      return null;
+  }
+}
+
+/** آیا این کانال در تب جدید باز می‌شود؟ (tel/mailto در همان تب می‌مانند) */
+const OPENS_NEW_TAB: Record<ChannelKey, boolean> = {
+  instagram: true,
+  whatsapp: true,
+  telegram: true,
+  siteForm: true,
+  email: false,
+  phone: false,
+};
+
+/**
+ * کانال‌های ارتباط به‌صورت **لینک قابل‌کلیک**.
+ * @param businessName در نام دسترس‌پذیر هر لینک می‌آید تا خارج از زمینه هم روشن باشد
+ */
+function Channels({ channels, businessName }: { channels: ContactChannels; businessName?: string }) {
   const keys = (Object.keys(CHANNEL_LABELS) as ChannelKey[]).filter((k) => channels[k]);
   if (keys.length === 0) return <span className="text-ink-muted">—</span>;
   return (
     <ul className="flex flex-wrap gap-1">
-      {keys.map((k) => (
-        <li
-          key={k}
-          className="rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700"
-        >
-          {CHANNEL_LABELS[k]}
-          {/* مقدار واقعی برای screen reader — title روی li خوانده نمی‌شود */}
-          <span className="sr-only">: {String(channels[k])}</span>
-        </li>
-      ))}
+      {keys.map((k) => {
+        const value = String(channels[k]);
+        const href = channelHref(k, value);
+        const newTab = OPENS_NEW_TAB[k];
+        const label = `${CHANNEL_LABELS[k]}${businessName ? ` ${businessName}` : ""}: ${value}${
+          newTab ? " (در تب جدید باز می‌شود)" : ""
+        }`;
+        return (
+          <li key={k}>
+            {href ? (
+              <a
+                href={href}
+                aria-label={label}
+                {...(newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                className="inline-block rounded-full bg-brand-50 px-2 py-1 text-xs font-medium text-brand-700 underline underline-offset-2 hover:bg-brand-100"
+              >
+                {CHANNEL_LABELS[k]}
+              </a>
+            ) : (
+              <span className="inline-block rounded-full bg-brand-50 px-2 py-1 text-xs font-medium text-brand-700">
+                {CHANNEL_LABELS[k]}
+                <span className="sr-only">: {value}</span>
+              </span>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -162,6 +235,36 @@ function scoreBand(score: number | null): string {
   return "کیفیت پایین — بهتر است متن بازنویسی شود";
 }
 
+/**
+ * کپی متن در کلیپ‌بورد.
+ * `navigator.clipboard` روی http (غیر-https) در دسترس نیست، پس یک مسیر پشتیبان
+ * با textarea موقت هم دارد تا دکمه در محیط توسعه‌ی محلی هم کار کند.
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* می‌افتیم روی مسیر پشتیبان */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 type MsgFilter = "all" | "draft" | "approved" | "sent";
 
 const MSG_FILTERS: { id: MsgFilter; label: string }[] = [
@@ -173,9 +276,29 @@ const MSG_FILTERS: { id: MsgFilter; label: string }[] = [
 
 /* ── پنل جزئیات لید (تحلیل + ریز امتیاز + تایم‌لاین) ───────── */
 
-type LeadDetail = { lead: Lead; analysis: LeadAnalysis | null; runs: AgentRun[] };
+type LeadDetail = {
+  lead: Lead;
+  analysis: LeadAnalysis | null;
+  runs: AgentRun[];
+  /** آیا تحلیل خودکار پیج اینستاگرام روی سرور فعال است؟ */
+  instagramAuto?: boolean;
+};
 
-function LeadPanel({ lead, detail, onClose }: { lead: Lead; detail: LeadDetail | null; onClose: () => void }) {
+function LeadPanel({
+  lead,
+  detail,
+  igDraft,
+  onIgDraftChange,
+  onSaveIgNote,
+  onClose,
+}: {
+  lead: Lead;
+  detail: LeadDetail | null;
+  igDraft: string;
+  onIgDraftChange: (v: string) => void;
+  onSaveIgNote: (v: string) => void;
+  onClose: () => void;
+}) {
   if (!detail) {
     return <p className="text-sm text-ink-muted">در حال بارگذاری جزئیات…</p>;
   }
@@ -276,6 +399,54 @@ function LeadPanel({ lead, detail, onClose }: { lead: Lead; detail: LeadDetail |
         </section>
       )}
 
+      {/* توان مالی — تخمین از نشانه‌های عمومی، نه درآمد واقعی */}
+      {lead.affluenceScore != null && (
+        <section>
+          <h4 id={`aff-h-${lead.id}`} className="text-sm font-extrabold text-ink">
+            نشانه‌های توان مالی — <bdi>{fa(lead.affluenceScore)}</bdi> از ۱۰۰
+          </h4>
+          <p className="mt-1 text-xs text-ink-muted">
+            تخمینی از روی داده‌ی عمومی (تعداد نظر، نوع دامنه، منطقه، مقیاس نام). درآمد واقعی از
+            داده‌ی عمومی قابل‌دانستن نیست، پس این عدد فقط برای اولویت‌بندی صف کار است و هرگز وارد
+            متن پیام نمی‌شود.
+          </p>
+          <ul aria-labelledby={`aff-h-${lead.id}`} className="mt-2 space-y-1 text-sm text-ink-muted">
+            {lead.affluenceSignals.map((s, i) => (
+              <li key={i}>• {s}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* یافته‌ی دستی اینستاگرام */}
+      <section>
+        <h4 className="text-sm font-extrabold text-ink">بررسی دستی پیج اینستاگرام</h4>
+        <p className="mt-1 text-xs leading-6 text-ink-muted">
+          {detail.instagramAuto === false
+            ? "تحلیل خودکار پیج خاموش است (کلید IG_ACCESS_TOKEN روی سرور تنظیم نشده). هرچه اینجا بنویسی مثل «مشاهده‌ی قطعی» وارد تحلیل و پیام بعدی می‌شود."
+            : "هرچه اینجا بنویسی، علاوه بر داده‌ی خودکار، مثل «مشاهده‌ی قطعی» وارد تحلیل و پیام بعدی می‌شود."}
+        </p>
+        <label htmlFor={`ig-note-${lead.id}`} className="mt-2 block text-sm font-medium text-ink">
+          یافته‌ی بررسی پیج {lead.businessName}
+        </label>
+        <textarea
+          id={`ig-note-${lead.id}`}
+          value={igDraft}
+          onChange={(e) => onIgDraftChange(e.target.value)}
+          rows={3}
+          placeholder="مثال: ۱۲ هزار فالوئر، آخرین پست ۳ ماه پیش، بایو بدون لینک، بیشتر پست‌ها عکس ساده از محصول"
+          className="mt-1 w-full rounded-lg border border-brand-400 bg-white px-3 py-2 text-sm leading-7 text-ink"
+        />
+        <button
+          type="button"
+          onClick={() => onSaveIgNote(igDraft)}
+          aria-label={`ذخیره‌ی یافته‌ی اینستاگرام ${lead.businessName}`}
+          className="mt-2 rounded-lg bg-pine px-4 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
+        >
+          ذخیره‌ی یافته
+        </button>
+      </section>
+
       {/* تایم‌لاین اجرای ایجنت‌ها */}
       {detail.runs.length > 0 && (
         <section>
@@ -324,6 +495,8 @@ export function Studio() {
   // تحلیل لید (فاز ۳)
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
+  const [msgGenRunning, setMsgGenRunning] = useState(false);
+  const [igDrafts, setIgDrafts] = useState<Record<string, string>>({});
   const [remaining, setRemaining] = useState<number | null>(null);
   // کانال اعلان زنده‌ی جدا. nonce لازم است: اگر متن دقیقاً تکراری باشد، React
   // گره‌ی متنی را عوض نمی‌کند و screen reader چیزی اعلام نمی‌کند.
@@ -380,7 +553,7 @@ export function Studio() {
   const [name, setName] = useState("");
   const [market, setMarket] = useState("all"); // پیش‌فرض: همه‌ی بازارها ترکیبی
   const [city, setCity] = useState("تهران");
-  const [service, setService] = useState(SERVICES[0]?.id ?? "");
+  const [service, setService] = useState(ALL_SERVICES_ID); // پیش‌فرض: همه‌ی موارد
 
   // افزودن دستی لید
   const [mName, setMName] = useState("");
@@ -471,12 +644,19 @@ export function Studio() {
     setError("");
     setNotice("");
     try {
-      const { summary } = await api<{ summary: { found: number; inserted: number; duplicates: number; invalid: number } }>(
-        "/api/discovery",
-        { method: "POST", body: JSON.stringify({ campaignId: selectedId }) }
-      );
+      const { summary } = await api<{
+        summary: {
+          found: number;
+          inserted: number;
+          duplicates: number;
+          invalid: number;
+          webSearches: number;
+          webLeads: number;
+        };
+      }>("/api/discovery", { method: "POST", body: JSON.stringify({ campaignId: selectedId }) });
       setNotice(
-        `کشف انجام شد: ${summary.found} یافت، ${summary.inserted} جدید، ${summary.duplicates} تکراری، ${summary.invalid} نامعتبر.`
+        `کشف انجام شد: ${fa(summary.found)} یافت، ${fa(summary.inserted)} جدید، ${fa(summary.duplicates)} تکراری، ${fa(summary.invalid)} نامعتبر — ` +
+          `${fa(summary.webSearches)} جست‌وجوی وب مصرف شد و ${fa(summary.webLeads)} لید از آن آمد.`
       );
       await loadLeads(selectedId);
     } catch (e) {
@@ -604,6 +784,120 @@ export function Studio() {
       await loadLeads(selectedId).catch(() => {});
     } finally {
       setBatchRunning(false);
+    }
+  }
+
+  /**
+   * تولید پیام برای **یک** لید — دکمه‌ی هر ردیف جدول.
+   *
+   * گام پیام سه زیرگام دارد (نویسنده → منتقد → بازنویسی) و هر کدام یک فراخوان
+   * مدل است، پس مثل تحلیل گروهی، کلاینت گام‌ها را پشت‌سرهم می‌زند تا از سقف
+   * ۶۰ ثانیه‌ای تابع Vercel رد نشود.
+   */
+  async function generateMessageFor(lead: Lead) {
+    if (analyzingId || batchRunning || msgGenRunning) return;
+    setAnalyzingId(lead.id);
+    setError("");
+    setTaskStatus(`تولید پیام برای «${lead.businessName}» شروع شد…`);
+    try {
+      for (let i = 0; i < 8; i++) {
+        const res = await api<{ step: { ran: string; summary: string } | null; done: boolean }>(
+          "/api/pipeline",
+          { method: "POST", body: JSON.stringify({ leadId: lead.id, step: true }) }
+        );
+        if (!res.step) break;
+        setTaskStatus(`«${lead.businessName}»: ${res.step.summary}`);
+        if (res.done) break;
+      }
+      if (selectedId) {
+        await loadLeads(selectedId);
+        await loadMessages(selectedId);
+      }
+      setTaskStatus(`پیام «${lead.businessName}» آماده شد و در بخش پیام‌ها منتظر تأیید توست.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`تولید پیام «${lead.businessName}» ناموفق بود: ${msg}`);
+      setTaskStatus("");
+    } finally {
+      setAnalyzingId(null);
+    }
+  }
+
+  /**
+   * تولید پیام برای **همه‌ی** لیدهای آماده‌ی کمپین — دقیقاً مثل تحلیل گروهی:
+   * یکی‌یکی، پشت‌سرهم، تا آخر. حالت `only: "message"` باعث می‌شود سهمیه‌ی مدل
+   * صرف تحلیل نشود.
+   */
+  async function generateAllMessages() {
+    if (msgGenRunning || batchRunning || analyzingId || !selectedId) return;
+
+    const MAX_STEPS = 800; // سقف ایمنی در برابر باگ سرور، نه محدودیت کاربر
+    setMsgGenRunning(true);
+    setError("");
+    setNotice("");
+    setTaskStatus("تولید پیام گروهی شروع شد. لیدها یکی‌یکی و پشت‌سرهم پیام می‌گیرند تا همه تمام شوند.");
+
+    let made = 0;
+    try {
+      for (let i = 0; i < MAX_STEPS; i++) {
+        const res = await api<{
+          step: { ran: string; summary: string } | null;
+          businessName?: string;
+          remaining: number;
+          done: boolean;
+        }>("/api/pipeline", {
+          method: "POST",
+          body: JSON.stringify({ campaignId: selectedId, only: "message" }),
+        });
+
+        if (res.done || !res.step) break;
+
+        if (res.step.ran === "message") {
+          made++;
+          setTaskStatus(
+            `پیام «${res.businessName ?? "لید"}» آماده شد. ${fa(res.remaining)} لید باقی مانده. در حال ادامه…`
+          );
+          await loadMessages(selectedId).catch(() => {});
+          await loadLeads(selectedId).catch(() => {});
+        } else {
+          setTaskStatus(`«${res.businessName ?? "لید"}»: ${res.step.summary}`);
+        }
+      }
+
+      await loadLeads(selectedId);
+      await loadMessages(selectedId);
+      setTaskStatus(`تولید پیام گروهی تمام شد. ${fa(made)} پیام آماده‌ی تأیید است.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(
+        made > 0
+          ? `${fa(made)} پیام ساخته شد، سپس خطا رخ داد: ${msg} — می‌توانی دوباره دکمه را بزنی تا ادامه دهد.`
+          : `تولید پیام گروهی ناموفق بود: ${msg}`
+      );
+      setTaskStatus("");
+      await loadMessages(selectedId).catch(() => {});
+    } finally {
+      setMsgGenRunning(false);
+    }
+  }
+
+  /** ثبت یافته‌ی دستی بررسی پیج اینستاگرام */
+  async function saveIgNote(leadId: string, businessName: string, note: string) {
+    setError("");
+    try {
+      await api(`/api/leads/${leadId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ igNote: note }),
+      });
+      await loadDetail(leadId);
+      if (selectedId) await loadLeads(selectedId).catch(() => {});
+      setTaskStatus(
+        note.trim()
+          ? `یافته‌ی اینستاگرام «${businessName}» ذخیره شد و در تحلیل و پیام بعدی استفاده می‌شود.`
+          : `یافته‌ی اینستاگرام «${businessName}» پاک شد.`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -773,7 +1067,23 @@ export function Studio() {
     }
   }
 
-  /* ── مقادیر مشتق‌شده‌ی پیام‌ها ─────────────────────────── */
+  /* ── مقادیر مشتق‌شده ────────────────────────────────────── */
+
+  /**
+   * هر کار مدل‌محور در یک زمان. دلیل: سهمیه‌ی روزانه‌ی مدل رایگان محدود است و
+   * چند درخواست هم‌زمان هم rate-limit می‌خورد هم پیشرفت را غیرقابل‌پیگیری می‌کند.
+   */
+  const busyAny = batchRunning || msgGenRunning || analyzingId !== null;
+
+  /** پیام فقط برای لیدی معنا دارد که تحلیل و امتیازدهی شده و منتظر پیام است */
+  const canMessage = (l: Lead) => l.status === "READY_FOR_MESSAGE";
+
+  /** لیدهای آماده‌ی پیام در کمپین انتخابی */
+  const readyForMessageCount = leads.filter(canMessage).length;
+  /** آیا هنوز لید تحلیل‌نشده‌ای مانده؟ (شرط فعال‌شدن دکمه‌ی گروهی) */
+  const unanalyzedCount = leads.filter((l) => l.status === "NEW" || l.status === "SCORED").length;
+  const canGenerateAll = readyForMessageCount > 0 && unanalyzedCount === 0;
+
   const visibleMessages = msgFilter === "all" ? messages : messages.filter((m) => m.status === msgFilter);
   const blockedCount = messages.filter((m) => m.policy.verdict === "BLOCK").length;
   const reviewCount = messages.filter((m) => m.policy.verdict === "HUMAN_REVIEW").length;
@@ -795,6 +1105,14 @@ export function Studio() {
       <span id="policy-block-note" className="sr-only">
         نگهبان سیاست این پیام را مسدود کرده است؛ سرور تأیید آن را نمی‌پذیرد. ابتدا متن را ویرایش و
         ذخیره کنید تا دوباره بررسی شود.
+      </span>
+      <span id="msg-gate-note" className="sr-only">
+        تولید پیام فقط برای لیدی ممکن است که تحلیل و امتیازدهی شده و در وضعیت «آماده‌ی پیام» است.
+        ابتدا دکمه‌ی «تحلیل لید» را بزنید.
+      </span>
+      <span id="msg-all-gate-note" className="sr-only">
+        این دکمه وقتی فعال می‌شود که همه‌ی لیدهای کمپین تحلیل و امتیازدهی شده باشند و دست‌کم یک لید
+        در وضعیت «آماده‌ی پیام» باشد.
       </span>
 
       {/* پیام‌های وضعیت (زنده برای screen reader) */}
@@ -863,14 +1181,20 @@ export function Studio() {
               id="c-service"
               value={service}
               onChange={(e) => setService(e.target.value)}
+              aria-describedby="c-service-note"
               className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
             >
+              <option value={ALL_SERVICES_ID}>همه‌ی موارد (سیستم خودش انتخاب می‌کند)</option>
               {SERVICES.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.title}
                 </option>
               ))}
             </select>
+            <p id="c-service-note" className="text-xs text-ink-muted">
+              این فقط یک یادداشت کمپین است؛ در هر حال ایجنت متناسب‌ترین خدمت را با درد همان
+              کسب‌وکار انتخاب می‌کند.
+            </p>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -908,12 +1232,12 @@ export function Studio() {
             <button
               type="button"
               onClick={discover}
-              aria-disabled={!selectedId || busy === "discover" || batchRunning}
+              aria-disabled={!selectedId || busy === "discover" || busyAny}
               onClickCapture={(e) => {
-                if (!selectedId || busy === "discover" || batchRunning) e.preventDefault();
+                if (!selectedId || busy === "discover" || busyAny) e.preventDefault();
               }}
               className={
-                !selectedId || busy === "discover" || batchRunning
+                !selectedId || busy === "discover" || busyAny
                   ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
                   : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
               }
@@ -924,13 +1248,13 @@ export function Studio() {
             <button
               type="button"
               onClick={() => {
-                if (!selectedId || batchRunning || analyzingId) return;
+                if (!selectedId || busyAny) return;
                 void analyzeBatch();
               }}
-              aria-disabled={!selectedId || batchRunning || analyzingId !== null}
+              aria-disabled={!selectedId || busyAny}
               aria-describedby="batch-remaining"
               className={
-                !selectedId || batchRunning || analyzingId
+                !selectedId || busyAny
                   ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
                   : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
               }
@@ -1105,8 +1429,12 @@ export function Studio() {
                   <th scope="col" className="px-4 py-3 font-semibold">تلفن</th>
                   <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
                   <th scope="col" className="px-4 py-3 font-semibold">امتیاز</th>
+                  <th scope="col" className="px-4 py-3 font-semibold">
+                    توان مالی
+                    <span className="sr-only"> — تخمین از نشانه‌های عمومی، نه درآمد واقعی</span>
+                  </th>
                   <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">تحلیل</th>
+                  <th scope="col" className="px-4 py-3 font-semibold">عملیات</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-line bg-surface">
@@ -1142,10 +1470,13 @@ export function Studio() {
                       <td className="px-4 py-3 text-ink-muted">{l.city ?? "—"}</td>
                       <td className="px-4 py-3 text-ink-muted" dir="ltr">{l.phone ?? "—"}</td>
                       <td className="px-4 py-3">
-                        <Channels channels={l.contactChannels} />
+                        <Channels channels={l.contactChannels} businessName={l.businessName} />
                       </td>
                       <td className="px-4 py-3 text-ink-muted">
                         {l.score != null ? <bdi>{fa(l.score)}</bdi> : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-ink-muted">
+                        {l.affluenceScore != null ? <bdi>{fa(l.affluenceScore)}</bdi> : "—"}
                       </td>
                       <td className="px-4 py-3">
                         <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
@@ -1153,32 +1484,56 @@ export function Studio() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          aria-label={`تحلیل لید ${l.businessName}`}
-                          aria-disabled={batchRunning || analyzingId !== null}
-                          aria-describedby={batchRunning ? "batch-block-note" : undefined}
-                          onClick={() => {
-                            if (batchRunning || analyzingId) return;
-                            void analyze(l);
-                          }}
-                          className={
-                            batchRunning || analyzingId !== null
-                              ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
-                              : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
-                          }
-                        >
-                          {analyzingId === l.id ? "در حال تحلیل…" : "تحلیل لید"}
-                        </button>
+                        <div role="group" aria-label={`عملیات لید ${l.businessName}`} className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            aria-label={`تحلیل لید ${l.businessName}`}
+                            aria-disabled={busyAny}
+                            aria-describedby={batchRunning ? "batch-block-note" : undefined}
+                            onClick={() => {
+                              if (busyAny) return;
+                              void analyze(l);
+                            }}
+                            className={
+                              busyAny
+                                ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
+                                : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
+                            }
+                          >
+                            {analyzingId === l.id ? "در حال تحلیل…" : "تحلیل لید"}
+                          </button>
+
+                          {/* تولید پیام فقط بعد از امتیازگرفتن معنا دارد */}
+                          <button
+                            type="button"
+                            aria-label={`تولید پیام اختصاصی برای ${l.businessName}`}
+                            aria-disabled={busyAny || !canMessage(l)}
+                            aria-describedby={!canMessage(l) ? "msg-gate-note" : undefined}
+                            onClick={() => {
+                              if (busyAny || !canMessage(l)) return;
+                              void generateMessageFor(l);
+                            }}
+                            className={
+                              busyAny || !canMessage(l)
+                                ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
+                                : "rounded-lg bg-pine px-3 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
+                            }
+                          >
+                            تولید پیام
+                          </button>
+                        </div>
                       </td>
                     </tr>
 
                     {/* پنل جزئیات — همیشه رندر، فقط hidden جابه‌جا می‌شود */}
                     <tr id={`lead-panel-${l.id}`} hidden={openId !== l.id}>
-                      <td colSpan={8} className="bg-surface-dim px-4 py-5">
+                      <td colSpan={9} className="bg-surface-dim px-4 py-5">
                         <LeadPanel
                           lead={l}
                           detail={details[l.id] ?? null}
+                          igDraft={igDrafts[l.id] ?? l.igNote ?? ""}
+                          onIgDraftChange={(v) => setIgDrafts((p) => ({ ...p, [l.id]: v }))}
+                          onSaveIgNote={(v) => void saveIgNote(l.id, l.businessName, v)}
                           onClose={() => togglePanel(l.id)}
                         />
                       </td>
@@ -1193,9 +1548,38 @@ export function Studio() {
 
       {/* ── پیام‌ها (تأیید انسانی — فاز ۴) ── */}
       <section aria-labelledby="messages-heading">
-        <h2 id="messages-heading" className="mb-2 text-lg font-extrabold text-ink">
-          پیام‌ها ({fa(messages.length)})
-        </h2>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+          <h2 id="messages-heading" className="text-lg font-extrabold text-ink">
+            پیام‌ها ({fa(messages.length)})
+          </h2>
+          <button
+            type="button"
+            onClick={() => {
+              if (busyAny || !canGenerateAll) return;
+              void generateAllMessages();
+            }}
+            aria-disabled={busyAny || !canGenerateAll}
+            aria-describedby={!canGenerateAll ? "msg-all-gate-note" : "msg-all-count"}
+            className={
+              busyAny || !canGenerateAll
+                ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
+                : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
+            }
+          >
+            {msgGenRunning ? "در حال تولید پیام‌ها…" : "تولید پیام برای همه‌ی لیدهای کمپین ✍️"}
+          </button>
+        </div>
+
+        {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی دکمه خوانده می‌شود */}
+        <p id="msg-all-count" className="mb-2 text-xs text-ink-muted">
+          {!selectedId
+            ? "ابتدا یک کمپین انتخاب کنید."
+            : unanalyzedCount > 0
+              ? `${fa(unanalyzedCount)} لید هنوز تحلیل نشده است. اول «تحلیل لیدهای کمپین انتخابی» را کامل کن، بعد این دکمه فعال می‌شود.`
+              : readyForMessageCount > 0
+                ? `${fa(readyForMessageCount)} لید آماده‌ی پیام است. با یک بار زدن، برای همه یکی‌یکی پیام ساخته می‌شود.`
+                : "لید آماده‌ی پیامی نیست. فقط لیدهایی که امتیاز ۷۰ به بالا گرفته‌اند پیام می‌گیرند."}
+        </p>
 
         {/* خلاصه‌ی ماندگار — نه اعلان زنده؛ همیشه قابل‌مرور با screen reader */}
         <p className="mb-4 text-xs leading-6 text-ink-muted">
@@ -1256,6 +1640,7 @@ export function Studio() {
               const text = drafts[m.id] ?? currentText(m);
               const dirty = text !== currentText(m);
               const words = wordCount(text);
+              const range = messageLengthFor(m.targetChannel);
               const blocked = m.policy.verdict === "BLOCK";
               const passed = m.policy.checks.filter((c) => c.pass).length;
               const busyHere = msgBusyId === m.id;
@@ -1333,13 +1718,23 @@ export function Studio() {
                       />
                       {/* وضعیت ماندگار (نه live region) — با aria-describedby خوانده می‌شود */}
                       <p id={`msg-meta-${m.id}`} className="mt-1 text-xs text-ink-muted">
-                        {fa(words)} کلمه (مجاز: {fa(MESSAGE_RULES.minWords)} تا {fa(MESSAGE_RULES.maxWords)}).{" "}
+                        {fa(words)} کلمه (بازه‌ی پیشنهادی این کانال: {fa(range.min)} تا {fa(range.max)}).{" "}
                         {dirty
                           ? "تغییرات ذخیره نشده است؛ دکمه‌ی «ذخیره‌ی متن» را بزن."
                           : savedAt[m.id]
                             ? "آخرین تغییر ذخیره شده است."
                             : "متن تغییری نکرده است."}
                       </p>
+                    </div>
+
+                    {/* کانال‌های ارتباط این کسب‌وکار — قابل کلیک، برای ارسال دستی */}
+                    <div className="mt-4">
+                      <h4 id={`ch-h-${m.id}`} className="text-sm font-extrabold text-ink">
+                        راه‌های ارتباط {m.businessName}
+                      </h4>
+                      <div className="mt-1">
+                        <Channels channels={m.contactChannels} businessName={m.businessName} />
+                      </div>
                     </div>
 
                     {/* نسخه‌ی ایمیلی — disclosure، همیشه رندر و فقط hidden جابه‌جا می‌شود */}
@@ -1447,6 +1842,45 @@ export function Studio() {
                       >
                         ذخیره‌ی متن
                       </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void copyText(text).then((ok) =>
+                            setTaskStatus(
+                              ok
+                                ? `متن پیام «${m.businessName}» کپی شد. حالا می‌توانی در ${
+                                    m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "کانال انتخابی"
+                                  } بفرستی.`
+                                : `کپی متن پیام «${m.businessName}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
+                            )
+                          );
+                        }}
+                        aria-label={`کپی متن پیام ${m.businessName}`}
+                        className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
+                      >
+                        کپی متن
+                      </button>
+
+                      {m.emailText && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const full = `${m.emailSubject ?? ""}\n\n${m.emailText ?? ""}`.trim();
+                            void copyText(full).then((ok) =>
+                              setTaskStatus(
+                                ok
+                                  ? `موضوع و متن ایمیل «${m.businessName}» کپی شد.`
+                                  : `کپی ایمیل «${m.businessName}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
+                              )
+                            );
+                          }}
+                          aria-label={`کپی موضوع و متن ایمیل ${m.businessName}`}
+                          className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
+                        >
+                          کپی ایمیل
+                        </button>
+                      )}
 
                       {m.status === "draft" && (
                         <>
@@ -1592,6 +2026,55 @@ export function Studio() {
             })}
           </ul>
         )}
+      </section>
+
+      {/* ── ۷ قالب پیام پیش‌فرض (کتابخانه‌ی مرجع، نه چیزی که سیستم بفرستد) ── */}
+      <section aria-labelledby="templates-heading">
+        <h2 id="templates-heading" className="mb-2 text-lg font-extrabold text-ink">
+          قالب‌های پیش‌فرض ({fa(MESSAGE_TEMPLATES.length)} خدمت)
+        </h2>
+        <p className="mb-4 text-xs leading-6 text-ink-muted">
+          یک قالب برای هر خدمت مهدیار، برای وقتی که خودت دستی پیام می‌نویسی یا سهمیه‌ی مدل تمام شده
+          است. جای خالی‌ها را حتماً پر کن:{" "}
+          <bdi className="font-bold">{"{نام}"}</bdi> نام کسب‌وکار و{" "}
+          <bdi className="font-bold">{"{مشاهده}"}</bdi> یک جزئیات واقعی که خودت دیده‌ای. قالبِ
+          پرنشده پیام عمومی است و جواب نمی‌دهد.
+        </p>
+
+        <ul className="grid gap-4 lg:grid-cols-2">
+          {MESSAGE_TEMPLATES.map((t) => {
+            const svc = SERVICES.find((s) => s.id === t.serviceId);
+            return (
+              <li key={t.serviceId}>
+                <article
+                  aria-labelledby={`tpl-h-${t.serviceId}`}
+                  className="h-full rounded-xl border border-surface-line bg-surface p-5 shadow-card"
+                >
+                  <h3 id={`tpl-h-${t.serviceId}`} className="text-sm font-extrabold text-ink">
+                    {svc?.title ?? t.serviceId}
+                  </h3>
+                  <p className="mt-2 whitespace-pre-line text-sm leading-7 text-ink-muted">{t.text}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyText(t.text).then((ok) =>
+                        setTaskStatus(
+                          ok
+                            ? `قالب «${svc?.title ?? t.serviceId}» کپی شد. یادت باشد جای خالی نام و مشاهده را پر کنی.`
+                            : `کپی قالب «${svc?.title ?? t.serviceId}» ناموفق بود؛ متن را دستی انتخاب و کپی کن.`
+                        )
+                      );
+                    }}
+                    aria-label={`کپی قالب ${svc?.title ?? t.serviceId}`}
+                    className="mt-3 rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
+                  >
+                    کپی قالب
+                  </button>
+                </article>
+              </li>
+            );
+          })}
+        </ul>
       </section>
     </div>
   );

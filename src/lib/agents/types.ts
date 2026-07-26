@@ -59,14 +59,34 @@ export type PortfolioSelectOutput = z.infer<typeof PortfolioSelectOutputSchema>;
 /* ── ۴. نویسنده‌ی پیام ──────────────────────────────────── */
 
 export const MessageWriterOutputSchema = z.object({
-  /** متن پیام برای کانال مجازی (۸۰–۱۲۰ کلمه — §22) */
-  message: z.string().min(40),
+  /**
+   * اگر داده کافی نبود، پیام **ساخته نمی‌شود** (دستور پیام‌نویسی، بند ۱۷).
+   * نویسنده حق ندارد برای کامل‌شدن پیام اطلاعات بسازد.
+   */
+  status: z.enum(["OK", "INSUFFICIENT_DATA", "NO_RELEVANT_PORTFOLIO"]).default("OK"),
+  /** متن پیام برای کانال مجازی — طول تابع کانال است (config.MESSAGE_LENGTH_BY_CHANNEL) */
+  message: z.string(),
   /** موضوع ایمیل (فقط اگر لید ایمیل داشته باشد) */
   emailSubject: z.string().nullable(),
   /** نسخه‌ی ایمیلی همان پیام، کمی رسمی‌تر */
   emailBody: z.string().nullable(),
-  /** چه چیزهایی برای شخصی‌سازی استفاده شد (شفافیت) */
-  personalizationUsed: z.array(z.string()).min(1).max(4),
+  /**
+   * «مشاهده‌ی قطعی» — چیزهایی که مستقیماً در داده‌ی داده‌شده دیده شده‌اند.
+   * منتقد باید بتواند تک‌تک را در evidence پیدا کند.
+   */
+  observations: z.array(z.string()).min(1).max(4),
+  /**
+   * «برداشت احتمالی» — نتیجه‌گیری غیرقطعی. باید در متن پیام با زبان محتاطانه
+   * آمده باشد («فکر کردم می‌شه…»، «به نظرم…»)، نه به‌شکل مشکل قطعی.
+   */
+  inferences: z.array(z.string()).max(3).default([]),
+  /** خدمت‌های معرفی‌شده: ۱ اصلی + تا ۲ مکمل با یک نتیجه‌ی مشترک */
+  servicesUsed: z.array(z.string()).min(1).max(3),
+  /**
+   * وضعیت نمونه‌کار در متن (بند ۹). پیش‌فرض `available` است چون مالک
+   * نمونه‌کار را **دستی** اتچ می‌کند — ادعای «فرستادم» دروغ است.
+   */
+  portfolioMention: z.enum(["attached", "available", "linked", "none"]).default("available"),
   /** دردی که پیام هدف گرفته */
   painTargeted: z.string().min(5),
   cta: z.string().min(3),

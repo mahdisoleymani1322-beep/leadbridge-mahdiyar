@@ -4,6 +4,7 @@ import { getStore, type Lead, type LeadAnalysis, type LeadStatus } from "@/lib/s
 import { MAX_STEPS_PER_LEAD } from "@/lib/config";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
 import { runLeadAnalysis } from "./lead-analysis";
+import { scoreAffluence } from "./affluence";
 import { scoreLead, type ScoreResult } from "./scoring";
 import { runServiceMatch } from "./service-match";
 import { runPortfolioSelect } from "./portfolio-select";
@@ -105,6 +106,18 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
       isInstagramConfigured() && lead.instagramHandle
         ? await businessDiscovery(lead.instagramHandle)
         : null;
+
+    // توان مالی — صفر توکن. اگر هنگام کشف محاسبه نشده (مثل لیدهای دستی یا
+    // لیدهای قدیمیِ قبل از فاز ۵)، همین حالا حساب می‌شود.
+    if (lead.affluenceScore == null) {
+      const aff = scoreAffluence(lead, { instagramFollowers: igProfile?.followersCount ?? null });
+      await store.updateLead(leadId, {
+        affluenceScore: aff.score,
+        affluenceSignals: aff.signals,
+      });
+      lead.affluenceScore = aff.score;
+      lead.affluenceSignals = aff.signals;
+    }
 
     const analysis = await runLeadAnalysis({ lead, igProfile });
     await store.upsertAnalysis({
@@ -246,7 +259,32 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
         serviceId: existing.recommendedService,
         channel: lead.preferredChannel,
         hasEmail,
+        igNote: lead.igNote,
       });
+
+      // نویسنده حق دارد بگوید داده کافی نیست (دستور پیام‌نویسی، بند ۱۷).
+      // در آن حالت پیام ساخته نمی‌شود و لید به بازبینی انسانی می‌رود — بهتر از
+      // ساختن پیامی که اطلاعاتش از خود مدل درآمده.
+      if (draft.status !== "OK" || !draft.message.trim()) {
+        await store.updateLead(leadId, { status: "MESSAGE_REVIEW" });
+        await logRun(
+          "message-writer",
+          "done",
+          `پیام ساخته نشد — ${draft.status}. داده‌ی کافی برای پیام شخصی‌سازی‌شده نبود.`,
+          draft
+        );
+        return {
+          leadId,
+          ran: "message",
+          status: "MESSAGE_REVIEW",
+          score: lead.score,
+          done: true,
+          summary:
+            draft.status === "NO_RELEVANT_PORTFOLIO"
+              ? "نمونه‌کار مرتبطی نبود؛ نیاز به بازبینی انسانی."
+              : "داده‌ی کافی برای پیام شخصی‌سازی‌شده نبود؛ نیاز به بازبینی انسانی.",
+        };
+      }
 
       const created: Message = {
         id: randomUUID(),
@@ -280,6 +318,13 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
     const currentText = msg.finalText ?? msg.draftText;
     const rounds = runs.filter((r) => r.agentName === "message-writer" && r.status === "done").length - 1;
 
+    // وضعیت نمونه‌کارِ اعلام‌شده‌ی نویسنده — منتقد و Policy Guard برای تشخیص
+    // ادعای دروغِ «فرستادم» به آن نیاز دارند.
+    const lastWriter = runs.find((r) => r.agentName === "message-writer" && r.status === "done");
+    const portfolioMention =
+      (lastWriter?.output as { portfolioMention?: "attached" | "available" | "linked" | "none" } | null)
+        ?.portfolioMention ?? "available";
+
     // ── ۴ب: پیام هست ولی نمره ندارد → منتقد ──
     if (msg.criticScore == null) {
       const critic = await runMessageCritic({
@@ -287,6 +332,8 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
         businessName: lead.businessName,
         analysis: analysisInput,
         serviceId: existing.recommendedService,
+        channel: lead.preferredChannel,
+        portfolioMention,
       });
       await store.updateMessage(msg.id, { criticScore: critic.score });
       await logRun(
@@ -298,7 +345,11 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
 
       // نمره قبول است یا سهمیه‌ی بازنویسی تمام شده → نهایی کن
       if (critic.score >= CRITIC_THRESHOLDS.pass || rounds >= MAX_REVISION_ROUNDS) {
-        const policy = checkPolicy(currentText, { businessName: lead.businessName });
+        const policy = checkPolicy(currentText, {
+          businessName: lead.businessName,
+          channel: lead.preferredChannel,
+          portfolioMention,
+        });
         const needsHuman = critic.score < CRITIC_THRESHOLDS.pass || policy.verdict !== "PASS";
         await store.updateLead(leadId, { status: needsHuman ? "MESSAGE_REVIEW" : "MESSAGE_DRAFTED" });
         return {
@@ -337,8 +388,24 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
       serviceId: existing.recommendedService,
       channel: lead.preferredChannel,
       hasEmail,
+      igNote: lead.igNote,
       revision: { previousMessage: currentText, instructions },
     });
+
+    // اگر بازنویسی هم به داده‌ی کافی نرسید، همان متن قبلی می‌ماند و کار به
+    // بازبینی انسانی می‌رود — بهتر از خالی‌کردن پیامِ موجود.
+    if (revised.status !== "OK" || !revised.message.trim()) {
+      await store.updateLead(leadId, { status: "MESSAGE_REVIEW" });
+      await logRun("message-writer", "done", `بازنویسی ناموفق — ${revised.status}`, revised);
+      return {
+        leadId,
+        ran: "message",
+        status: "MESSAGE_REVIEW",
+        score: lead.score,
+        done: true,
+        summary: "بازنویسی به نتیجه نرسید؛ متن قبلی برای بازبینی انسانی ماند.",
+      };
+    }
 
     await store.updateMessage(msg.id, {
       draftText: revised.message,

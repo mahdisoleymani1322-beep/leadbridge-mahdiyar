@@ -21,7 +21,13 @@ export type Campaign = {
   market: string;
   /** شهر هدف (پیش‌فرض تهران) */
   city: string;
-  /** خدمت اصلی کمپین — یکی از ۷ خدمت مهدیار (brand.SERVICES[].id) */
+  /**
+   * خدمت اصلی کمپین — یکی از ۷ خدمت مهدیار، یا `all`.
+   *
+   * ⚠️ این فیلد عمداً **بی‌اثر** است و هیچ ایجنتی نمی‌خواندش: `service-match`
+   * همیشه آزادانه از هر ۷ خدمت انتخاب می‌کند، چون آزادی انتخاب همان چیزی است
+   * که شخصی‌سازی را ممکن می‌کند. اینجا فقط به‌عنوان یادداشت کمپین می‌ماند.
+   */
   primaryService: string;
   dailyDiscoveryLimit: number;
   dailyMessageLimit: number;
@@ -86,6 +92,22 @@ export type Lead = {
   /** امتیاز نهایی (۰ تا ۱۰۰) پس از Scoring */
   score: number | null;
   confidence: number | null;
+  /**
+   * تخمین توان مالی (۰ تا ۱۰۰) از نشانه‌های عمومی — agents/affluence.ts.
+   * فقط برای اولویت‌بندی صف کار؛ **هرگز وارد متن پیام نمی‌شود** چون درآمد
+   * واقعی از داده‌ی عمومی قابل‌دانستن نیست.
+   */
+  affluenceScore: number | null;
+  /** توضیح خوانای سیگنال‌هایی که به affluenceScore رسیدند */
+  affluenceSignals: string[];
+  /**
+   * یافته‌ی **دستی** بررسی پیج اینستاگرام.
+   * تحلیل خودکار پیج به IG_ACCESS_TOKEN نیاز دارد که هنوز ست نشده؛ تا آن
+   * موقع این فیلد جای رسمی ثبت مشاهده‌ی انسانی است و مثل «مشاهده‌ی قطعی»
+   * وارد پرامپت تحلیل و نویسنده می‌شود.
+   */
+  igNote: string | null;
+  igNoteAt: string | null;
   doNotContact: boolean;
   /** کلید یکتاسازی برای حذف تکراری (place_id یا تلفن نرمال‌شده) */
   dedupKey: string;
