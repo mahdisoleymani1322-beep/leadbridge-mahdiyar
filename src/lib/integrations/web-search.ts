@@ -15,18 +15,74 @@ import { WEB_SEARCH } from "@/lib/config";
 
 const TAVILY_URL = "https://api.tavily.com/search";
 
-/** دامنه‌های دایرکتوری/تجمیع‌گر که کسب‌وکار واقعی نیستند (رد می‌شوند) */
+/**
+ * دامنه‌هایی که کسب‌وکار هدف نیستند و باید رد شوند.
+ *
+ * چرا لازم است: کوئری‌هایی مثل «بهترین کارخانه تهران» عمداً به فهرست‌های
+ * تجمیع‌گر و مقاله‌های خبری می‌رسند. بدون این فیلتر، لیدهایی مثل «خبرگزاری مهر»
+ * یا «لیست بهترین کارخانه شن و ماسه» وارد پایگاه می‌شوند و سهمیه‌ی تحلیل را
+ * می‌سوزانند.
+ */
 const DIRECTORY_HOSTS = [
+  // تجمیع‌گر و دایرکتوری
   "behtarino.com",
   "iranamozeshgah.com",
   "zibato.net",
   "gzlocation.com",
-  "google.com",
-  "wikipedia.org",
-  "aparat.com",
+  "senfyab.com",
+  "codata.ir",
+  "jobinja.ir",
+  "eforosh.com",
+  "kilid.com",
+  "1717.ir",
+  "esfahanchi.ir",
+  // بازارگاه و آگهی
   "digikala.com",
   "sheypoor.com",
   "divar.ir",
+  "torob.com",
+  "basalam.com",
+  "emalls.ir",
+  // خبرگزاری و رسانه
+  "mehrnews.com",
+  "irna.ir",
+  "isna.ir",
+  "farsnews.ir",
+  "tasnimnews.com",
+  "khabaronline.ir",
+  "yjc.ir",
+  "eghtesadonline.com",
+  "donya-e-eqtesad.com",
+  "shana.ir",
+  // عمومی
+  "google.com",
+  "wikipedia.org",
+  "aparat.com",
+  "instagram.com", // شاخه‌ی اینستاگرام جداگانه پردازش می‌شود
+  "linkedin.com",
+  "facebook.com",
+  "t.me",
+  "telegram.me",
+];
+
+/** پسوندهای دامنه که کسب‌وکار خصوصی نیستند */
+const NON_BUSINESS_TLDS = [".ac.ir", ".gov.ir", ".sch.ir", ".edu"];
+
+/**
+ * عنوان‌هایی که نشان می‌دهند صفحه یک **فهرست/مقاله** است، نه خود کسب‌وکار.
+ * الگوی «لیست بهترین X با آدرس و تلفن» رایج‌ترین دام این نوع جست‌وجوست.
+ */
+const LISTICLE_PATTERNS = [
+  /^لیست\s/,
+  /^فهرست\s/,
+  /بانک اطلاعات/,
+  /با آدرس و تلفن/,
+  /معرفی\s+\d+/,
+  /^\d+\s*(تا|مورد|بهترین)/,
+  /راهنمای (خرید|انتخاب)/,
+  /^بهترین\s.{0,40}(در|های)\s/,
+  /اخبار|خبرگزاری|خبرنگار/,
+  /مقاله|پایان‌نامه|دانشگاه|پژوهش/,
 ];
 
 export function isWebSearchConfigured(): boolean {
@@ -88,11 +144,18 @@ function resultToPlace(r: any): DiscoveredPlace | null {
     };
   }
 
-  // در غیر این صورت: سایت رسمیِ کسب‌وکار (دایرکتوری‌ها رد می‌شوند)
+  // در غیر این صورت: سایت رسمیِ کسب‌وکار (دایرکتوری/خبر/دانشگاه رد می‌شوند)
   const host = hostOf(url);
-  if (!host || DIRECTORY_HOSTS.some((d) => host.endsWith(d))) return null;
+  if (!host) return null;
+  if (DIRECTORY_HOSTS.some((d) => host === d || host.endsWith("." + d))) return null;
+  if (NON_BUSINESS_TLDS.some((t) => host.endsWith(t))) return null;
+
   const name = cleanTitle(title);
   if (!name) return null;
+  // عنوانی که شبیه فهرست/مقاله است، کسب‌وکار نیست
+  if (LISTICLE_PATTERNS.some((re) => re.test(name))) return null;
+  // عنوان خیلی بلند تقریباً همیشه تیتر مقاله است، نه نام کسب‌وکار
+  if (name.length > 70) return null;
   return {
     placeId: `web:site:${host}`,
     name,
@@ -135,11 +198,17 @@ async function tavilySearch(query: string, maxResults: number): Promise<unknown[
   }
 }
 
-/** سه الگوی کوئری — هر کدام نوع متفاوتی از نتیجه می‌آورد */
+/**
+ * سه الگوی کوئری — هر کدام نوع متفاوتی از نتیجه می‌آورد.
+ *
+ * عمداً از «بهترین {term} {city}» استفاده نمی‌کنیم: آن کوئری تقریباً همیشه به
+ * فهرست‌های تجمیع‌گر و مقاله‌های «۱۰ تای برتر» می‌رسد، نه به خود کسب‌وکار.
+ * «درباره ما» و «تماس با ما» برعکس، تقریباً فقط روی سایت کسب‌وکار واقعی هستند.
+ */
 const QUERY_PATTERNS: ((term: string, city: string) => string)[] = [
-  (t, c) => `${t} ${c} اینستاگرام`, // پیج‌های بیزینس
-  (t, c) => `${t} ${c} سایت رسمی`, // سایت اختصاصی (سیگنال توان مالی)
-  (t, c) => `بهترین ${t} ${c}`, // فهرست‌های شناخته‌شده‌ی صنف
+  (t, c) => `${t} ${c} اینستاگرام`, // پیج بیزینس
+  (t, c) => `${t} ${c} درباره ما`, // صفحه‌ی «درباره ما» = سایت واقعی کسب‌وکار
+  (t, c) => `${t} ${c} تماس با ما`, // صفحه‌ی تماس = سایت واقعی کسب‌وکار
 ];
 
 /**
