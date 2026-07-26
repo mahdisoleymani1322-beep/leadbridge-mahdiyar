@@ -36,6 +36,11 @@ const DIRECTORY_HOSTS = [
   "kilid.com",
   "1717.ir",
   "esfahanchi.ir",
+  "doctoreto.com",
+  "drdr.ir",
+  "paziresh24.com",
+  "hircana.com",
+  "didebanamniatghazaie.ir",
   // بازارگاه و آگهی
   "digikala.com",
   "sheypoor.com",
@@ -78,12 +83,50 @@ const LISTICLE_PATTERNS = [
   /بانک اطلاعات/,
   /با آدرس و تلفن/,
   /معرفی\s+\d+/,
-  /^\d+\s*(تا|مورد|بهترین)/,
+  /^[\d۰-۹]+\s/, // «۱۰ فروشگاه برتر…»، «۱۳۳ مدل…» — عنوان با عدد شروع نمی‌شود اگر نام کسب‌وکار باشد
+  /(برتر|بهترین|محبوب‌ترین|معروف‌ترین)/,
   /راهنمای (خرید|انتخاب)/,
-  /^بهترین\s.{0,40}(در|های)\s/,
   /اخبار|خبرگزاری|خبرنگار/,
   /مقاله|پایان‌نامه|دانشگاه|پژوهش/,
+  /(\.\.\.|…)\s*$/, // عنوان بریده‌شده = تیتر مقاله، نه نام کسب‌وکار
+  /^کلینیک های\s|^کلینیک‌های\s/, // جمع = صفحه‌ی فهرست، نه یک کلینیک
 ];
+
+/**
+ * مسیرهای URL که نشان می‌دهند صفحه **مقاله یا فهرست** است، نه خود کسب‌وکار.
+ *
+ * این قوی‌ترین سیگنال است: سایت یک کسب‌وکار واقعی در نتیجه‌ی جست‌وجو معمولاً
+ * صفحه‌ی اصلی یا یک مسیر کم‌عمق («/about»، «/contact») است. مقاله و دایرکتوری
+ * تقریباً همیشه مسیر عمیق یا شناسه‌ی پست دارند.
+ */
+const ARTICLE_PATH_PATTERNS = [
+  /\/blog\//i,
+  /\/news\//i,
+  /\/article/i,
+  /\/magazine/i,
+  /\/category\//i,
+  /\/centers?\//i,
+  /\/tag\//i,
+  /\/archive/i,
+  /\/list\//i,
+  /\/post\//i,
+  /\/\d{4}\/\d{2}\//, // تاریخ در مسیر: /1404/07/
+];
+
+/** آیا این URL شکل «صفحه‌ی کسب‌وکار» دارد؟ */
+function looksLikeBusinessPage(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (ARTICLE_PATH_PATTERNS.some((re) => re.test(u.pathname))) return false;
+    // شناسه‌ی پست وردپرس (?p=123) = مقاله
+    if (u.searchParams.has("p") || u.searchParams.has("page_id")) return false;
+    // عمق مسیر: صفحه‌ی اصلی یا یک/دو سطح قابل‌قبول است؛ عمیق‌تر تقریباً همیشه محتواست
+    const depth = u.pathname.split("/").filter(Boolean).length;
+    return depth <= 2;
+  } catch {
+    return false;
+  }
+}
 
 export function isWebSearchConfigured(): boolean {
   return Boolean(process.env.TAVILY_API_KEY);
@@ -149,6 +192,7 @@ function resultToPlace(r: any): DiscoveredPlace | null {
   if (!host) return null;
   if (DIRECTORY_HOSTS.some((d) => host === d || host.endsWith("." + d))) return null;
   if (NON_BUSINESS_TLDS.some((t) => host.endsWith(t))) return null;
+  if (!looksLikeBusinessPage(url)) return null;
 
   const name = cleanTitle(title);
   if (!name) return null;
