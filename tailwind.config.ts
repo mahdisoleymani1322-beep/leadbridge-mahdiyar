@@ -12,7 +12,9 @@ const config: Config = {
       colors: {
         // رنگ‌های پایه‌ی برند (مثل سایت)
         pine: { DEFAULT: "#143A32", dark: "#0F2C26" },
-        brass: { DEFAULT: "#B5853A", dark: "#9A6F2E" },
+        // brass-dark هم رینگ فوکوس است هم پس‌زمینه‌ی دکمه؛ #966B2C روی سفید
+        // ۴.۷۳ می‌دهد و هر دو کاربرد را پوشش می‌دهد (۹A6F2E فقط ۴.۴۸ بود).
+        brass: { DEFAULT: "#B5853A", dark: "#966B2C" },
         bone: "#F7F3EC",
         sand: "#E7DECF",
 

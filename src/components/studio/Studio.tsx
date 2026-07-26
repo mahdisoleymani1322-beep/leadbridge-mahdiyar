@@ -468,6 +468,29 @@ function LeadPanel({
         </section>
       )}
 
+      {/* شناسنامه‌ی لید — صنعت/شهر/آدرس که از جدول بیرون رفتند تا شلوغ نشود */}
+      <section>
+        <h4 id={`ident-h-${lead.id}`} className="text-sm font-extrabold text-ink">
+          شناسنامه
+        </h4>
+        <dl aria-labelledby={`ident-h-${lead.id}`} className="mt-1 space-y-1 text-sm">
+          <div className="flex flex-wrap gap-x-2">
+            <dt className="text-ink-muted">صنعت:</dt>
+            <dd className="text-ink">{lead.industry ?? "ثبت نشده"}</dd>
+          </div>
+          <div className="flex flex-wrap gap-x-2">
+            <dt className="text-ink-muted">شهر:</dt>
+            <dd className="text-ink">{lead.city ?? "ثبت نشده"}</dd>
+          </div>
+          {lead.address && (
+            <div className="flex flex-wrap gap-x-2">
+              <dt className="text-ink-muted">آدرس:</dt>
+              <dd className="text-ink">{lead.address}</dd>
+            </div>
+          )}
+        </dl>
+      </section>
+
       {/* یافته‌ی دستی اینستاگرام */}
       <section>
         <h4 className="text-sm font-extrabold text-ink">بررسی دستی پیج اینستاگرام</h4>
@@ -549,6 +572,7 @@ function LeadPanel({
 function LeadsTable({
   leads,
   captionText,
+  regionLabel,
   emptyText,
   idPrefix,
   selectedIds,
@@ -568,6 +592,8 @@ function LeadsTable({
 }: {
   leads: Lead[];
   captionText: string;
+  /** نام کوتاه ناحیه‌ی اسکرول — عمداً با caption یکی نیست تا دوبار خوانده نشود */
+  regionLabel: string;
   emptyText: string;
   idPrefix: string;
   selectedIds: Set<string>;
@@ -596,7 +622,7 @@ function LeadsTable({
   return (
     <div
       role="region"
-      aria-label={captionText}
+      aria-label={regionLabel}
       tabIndex={0}
       className="overflow-x-auto rounded-xl border border-surface-line shadow-card"
     >
@@ -609,11 +635,13 @@ function LeadsTable({
         <thead className="bg-surface-dim text-xs text-ink-muted">
           <tr>
             <th scope="col" className="px-3 py-3 font-semibold">
-              <span className="sr-only">انتخاب</span>
+              <span className="sr-only">تیک انتخاب گروهی</span>
             </th>
             <th scope="col" className="px-4 py-3 font-semibold">کسب‌وکار</th>
             <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
-            <th scope="col" className="px-4 py-3 font-semibold">توان مالی</th>
+            <th scope="col" aria-sort="descending" className="px-4 py-3 font-semibold">
+              توان مالی
+            </th>
             <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
             <th scope="col" className="px-4 py-3 font-semibold">عملیات</th>
           </tr>
@@ -634,8 +662,10 @@ function LeadsTable({
                       onChange={() => onToggleSelect(l.id)}
                       className="h-6 w-6 accent-brand-600"
                     />
+                    {/* نقشِ checkbox خودش «انتخاب» را می‌رساند؛ تکرارش در برچسب
+                        باعث می‌شد «انتخاب، انتخاب فلان» خوانده شود */}
                     <label htmlFor={`${idPrefix}-sel-${l.id}`} className="sr-only">
-                      انتخاب {l.businessName}
+                      {l.businessName}
                     </label>
                   </td>
 
@@ -652,9 +682,18 @@ function LeadsTable({
                     >
                       {l.businessName}
                     </button>
-                    {/* صنعت زیر نام — به‌جای یک ستون جدا */}
+                    {/*
+                      صنعت دیداری زیر نام می‌ماند ولی aria-hidden است: محتوای
+                      <th scope="row"> پیش از **هر ۵ سلول** ردیف دوباره خوانده
+                      می‌شود و صنعت را ۵ بار تکرار می‌کرد. همین مقدار در پنل
+                      جزئیات همان ردیف برای screen reader آمده، پس داده‌ای
+                      از دست نمی‌رود.
+                    */}
                     {l.industry && (
-                      <span className="mt-0.5 block px-1 text-xs font-normal text-ink-muted">
+                      <span
+                        aria-hidden="true"
+                        className="mt-0.5 block px-1 text-xs font-normal text-ink-muted"
+                      >
                         {l.industry}
                       </span>
                     )}
@@ -811,6 +850,9 @@ export function Studio() {
   // عنوان کارت همیشه رندر است؛ بعد از تأیید/رد که دکمه‌ها unmount می‌شوند،
   // فوکوس به اینجا برمی‌گردد (وگرنه فوکوس به body می‌افتد).
   const cardHeadingRefs = useRef<Record<string, HTMLHeadingElement | null>>({});
+  // سرتیتر هر بخش — بعد از جابه‌جایی انبوه، فوکوس به مقصد می‌رود
+  const leadsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const shortlistHeadingRef = useRef<HTMLHeadingElement | null>(null);
 
   // فوکوس روی دکمه‌ی تأیید نهایی — همین جابه‌جایی خودش «اعلانِ» مسلح‌شدن است
   useEffect(() => {
@@ -1261,7 +1303,13 @@ export function Studio() {
         body: JSON.stringify({ ids, shortlisted: true }),
       });
       setSelectedIds(new Set());
+      // پنل باز را ببند: کلیدش شامل پیشوند جدول است («all:leadX»)، و لیدی که
+      // جابه‌جا می‌شود دیگر در آن جدول نیست — پس کلید هرگز دوباره جور نمی‌شود
+      // و بازگرداندن فوکوس به یک گره جداشده اشاره می‌کند.
+      setOpenId(null);
       await loadLeads(selectedId);
+      // فوکوس به مقصد: سرتیتر «فهرست منتخب» شمارنده‌ی جدید را دارد
+      shortlistHeadingRef.current?.focus();
       setTaskStatus(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
       setNotice(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
     } catch (e) {
@@ -1283,7 +1331,9 @@ export function Studio() {
         body: JSON.stringify({ ids, shortlisted: false }),
       });
       setShortSelectedIds(new Set());
+      setOpenId(null); // همان دلیل addToShortlist
       await loadLeads(selectedId);
+      leadsHeadingRef.current?.focus();
       setTaskStatus(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
       setNotice(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
     } catch (e) {
@@ -1550,6 +1600,12 @@ export function Studio() {
       <span id="msg-gate-note" className="sr-only">
         تولید پیام فقط برای لیدی ممکن است که تحلیل و امتیازدهی شده و در وضعیت «آماده‌ی پیام» است.
         ابتدا دکمه‌ی «تحلیل لید» را بزنید.
+      </span>
+      <span id="shortlist-gate-note" className="sr-only">
+        این دکمه وقتی فعال می‌شود که در جدول «همه‌ی لیدها» دست‌کم یک لید را تیک زده باشید.
+      </span>
+      <span id="unshortlist-gate-note" className="sr-only">
+        این دکمه وقتی فعال می‌شود که در جدول «فهرست منتخب» دست‌کم یک لید را تیک زده باشید.
       </span>
       <span id="msg-all-gate-note" className="sr-only">
         این دکمه وقتی فعال می‌شود که همه‌ی لیدهای کمپین تحلیل و امتیازدهی شده باشند و دست‌کم یک لید
@@ -1869,8 +1925,13 @@ export function Studio() {
       {/* ── لیدها ── */}
       <section aria-labelledby="leads-heading">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="leads-heading" className="text-lg font-extrabold text-ink">
-            همه‌ی لیدها ({fa(leads.length)})
+          <h2
+            id="leads-heading"
+            ref={leadsHeadingRef}
+            tabIndex={-1}
+            className="text-lg font-extrabold text-ink"
+          >
+            همه‌ی لیدها ({fa(unshortlisted.length)})
           </h2>
           <button
             type="button"
@@ -1879,7 +1940,9 @@ export function Studio() {
               void addToShortlist();
             }}
             aria-disabled={selectedIds.size === 0 || busy === "shortlist"}
-            aria-describedby="shortlist-hint"
+            aria-describedby={
+              selectedIds.size === 0 ? "shortlist-hint shortlist-gate-note" : "shortlist-hint"
+            }
             className={
               selectedIds.size === 0 || busy === "shortlist"
                 ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
@@ -1898,6 +1961,7 @@ export function Studio() {
 
         <LeadsTable
           leads={unshortlisted}
+          regionLabel="جدول همه‌ی لیدها"
           captionText="همه‌ی لیدهای کشف‌شده‌ی کمپین که هنوز به فهرست منتخب نرفته‌اند، از بالاترین توان مالی به پایین‌ترین. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه درآمد واقعی."
           emptyText={busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
           idPrefix="all"
@@ -1921,26 +1985,37 @@ export function Studio() {
       {/* ── فهرست منتخب — فضای کار روی لیدهای تأییدشده‌ی انسان ── */}
       <section aria-labelledby="shortlist-heading">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="shortlist-heading" className="text-lg font-extrabold text-ink">
+          <h2
+            id="shortlist-heading"
+            ref={shortlistHeadingRef}
+            tabIndex={-1}
+            className="text-lg font-extrabold text-ink"
+          >
             فهرست منتخب ({fa(shortlisted.length)})
           </h2>
-          {shortlisted.length > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                if (shortSelectedIds.size === 0 || busy === "shortlist") return;
-                void removeFromShortlist();
-              }}
-              aria-disabled={shortSelectedIds.size === 0 || busy === "shortlist"}
-              className={
-                shortSelectedIds.size === 0 || busy === "shortlist"
-                  ? "rounded-lg border border-ink-muted bg-surface px-4 py-2 text-sm font-bold text-ink-muted"
-                  : "rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
-              }
-            >
-              برگرداندن {fa(shortSelectedIds.size)} لید به فهرست اصلی
-            </button>
-          )}
+          {/*
+            بدون شرط رندر: اگر همه‌ی منتخب‌ها برگردانده شوند، این دکمه همان
+            عنصری است که فوکوس رویش است. حذفش از DOM فوکوس را به body می‌اندازد.
+            به‌جایش aria-disabled می‌شود — همان قراردادی که در کل این فایل هست.
+          */}
+          <button
+            type="button"
+            onClick={() => {
+              if (shortSelectedIds.size === 0 || busy === "shortlist") return;
+              void removeFromShortlist();
+            }}
+            aria-disabled={shortSelectedIds.size === 0 || busy === "shortlist"}
+            aria-describedby={shortSelectedIds.size === 0 ? "unshortlist-gate-note" : undefined}
+            className={
+              shortSelectedIds.size === 0 || busy === "shortlist"
+                ? "rounded-lg border border-ink-muted bg-surface px-4 py-2 text-sm font-bold text-ink-muted"
+                : "rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
+            }
+          >
+            {busy === "shortlist"
+              ? "در حال برگرداندن…"
+              : `برگرداندن ${fa(shortSelectedIds.size)} لید به فهرست اصلی`}
+          </button>
         </div>
         <p className="mb-4 text-xs leading-6 text-ink-muted">
           اینجا هر لید را جدا تحلیل کن و بعد پیامش را بساز. دکمه‌ی «تولید پیام» تا وقتی لید تحلیل و
@@ -1949,6 +2024,7 @@ export function Studio() {
 
         <LeadsTable
           leads={shortlisted}
+          regionLabel="جدول فهرست منتخب"
           captionText="لیدهای منتخب، از بالاترین توان مالی به پایین‌ترین. اینجا هر لید را جدا تحلیل و پیام‌سازی می‌کنی."
           emptyText="هنوز لیدی انتخاب نکرده‌ای. از جدول بالا تیک بزن و «افزودن به فهرست منتخب» را بزن."
           idPrefix="short"
