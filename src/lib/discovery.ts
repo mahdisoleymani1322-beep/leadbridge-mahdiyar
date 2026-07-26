@@ -228,6 +228,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       affluenceSignals: [],
       igNote: null,
       igNoteAt: null,
+      shortlisted: false,
+      shortlistedAt: null,
       doNotContact: false,
       dedupKey,
       createdAt: now,

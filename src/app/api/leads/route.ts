@@ -22,6 +22,39 @@ export async function GET(req: NextRequest) {
   return Response.json({ leads });
 }
 
+/**
+ * PATCH /api/leads — افزودن/برداشتن انبوهِ لیدها از «فهرست منتخب».
+ * بدنه: { ids: string[], shortlisted: boolean }
+ *
+ * چرا انبوه و نه تک‌تک: کاربر چند لید را با چک‌باکس انتخاب می‌کند و یک‌بار
+ * تأیید می‌زند؛ ۲۰ درخواست جدا هم کند است هم اگر وسطش قطع شود نیمه‌کاره می‌ماند.
+ */
+export async function PATCH(req: NextRequest) {
+  if (!isStudioAuthorized(req)) return unauthorized();
+
+  const body = await req.json().catch(() => ({}));
+  const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: unknown) => typeof x === "string") : [];
+  if (ids.length === 0) {
+    return Response.json({ error: "هیچ لیدی انتخاب نشده است." }, { status: 400 });
+  }
+  const shortlisted = body.shortlisted !== false;
+
+  const store = getStore();
+  const now = new Date().toISOString();
+  let updated = 0;
+  for (const id of ids) {
+    const lead = await store.getLead(id);
+    if (!lead) continue;
+    await store.updateLead(id, {
+      shortlisted,
+      shortlistedAt: shortlisted ? now : null,
+    });
+    updated++;
+  }
+
+  return Response.json({ updated, shortlisted });
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /** ساخت یک لید دستی از ورودی خام (فرم یا CSV) */
 function buildManualLead(raw: any, campaignId: string | null): Lead | null {
@@ -82,6 +115,8 @@ function buildManualLead(raw: any, campaignId: string | null): Lead | null {
     affluenceSignals: [],
     igNote: null,
     igNoteAt: null,
+    shortlisted: false,
+    shortlistedAt: null,
     doNotContact: false,
     dedupKey,
     createdAt: now,

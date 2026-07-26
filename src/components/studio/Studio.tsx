@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import type React from "react";
 import type {
   Campaign,
   Lead,
@@ -532,6 +533,234 @@ function LeadPanel({
   );
 }
 
+/* ── جدول لیدها (مشترک بین «همه» و «منتخب») ───────────────── */
+
+/**
+ * یک جدول برای هر دو فهرست.
+ *
+ * ستون‌ها عمداً کم شده‌اند (از ۹ به ۶): «شهر» تقریباً همیشه تهران بود و «تلفن»
+ * عیناً در ستون کانال‌ها تکرار می‌شد. «صنعت» زیر نام کسب‌وکار رفت تا ردیف
+ * باریک‌تر و قابل‌مرورتر شود. باقی اطلاعات در پنل جزئیات همان ردیف هست.
+ *
+ * `idPrefix` لازم است چون هر دو جدول هم‌زمان روی صفحه‌اند و بدون آن شناسه‌های
+ * `lead-panel-*` تکراری می‌شدند — که هم HTML نامعتبر است هم aria-controls را
+ * به گره اشتباه وصل می‌کند.
+ */
+function LeadsTable({
+  leads,
+  captionText,
+  emptyText,
+  idPrefix,
+  selectedIds,
+  onToggleSelect,
+  openId,
+  onTogglePanel,
+  triggerRefs,
+  details,
+  igDrafts,
+  onIgDraftChange,
+  onSaveIgNote,
+  busyAny,
+  analyzingId,
+  canMessage,
+  onAnalyze,
+  onGenerateMessage,
+}: {
+  leads: Lead[];
+  captionText: string;
+  emptyText: string;
+  idPrefix: string;
+  selectedIds: Set<string>;
+  onToggleSelect: (id: string) => void;
+  openId: string | null;
+  onTogglePanel: (id: string, prefix: string) => void;
+  triggerRefs: React.MutableRefObject<Record<string, HTMLButtonElement | null>>;
+  details: Record<string, LeadDetail>;
+  igDrafts: Record<string, string>;
+  onIgDraftChange: (id: string, v: string) => void;
+  onSaveIgNote: (lead: Lead, v: string) => void;
+  busyAny: boolean;
+  analyzingId: string | null;
+  canMessage: (l: Lead) => boolean;
+  onAnalyze: (l: Lead) => void;
+  onGenerateMessage: (l: Lead) => void;
+}) {
+  if (leads.length === 0) {
+    return (
+      <p className="rounded-xl border border-dashed border-surface-line bg-surface-dim p-6 text-center text-sm text-ink-muted">
+        {emptyText}
+      </p>
+    );
+  }
+
+  return (
+    <div
+      role="region"
+      aria-label={captionText}
+      tabIndex={0}
+      className="overflow-x-auto rounded-xl border border-surface-line shadow-card"
+    >
+      <table className="w-full min-w-[720px] border-collapse text-start text-sm">
+        {/*
+          توضیح ستون «توان مالی» عمداً در caption است نه در <th>: محتوای th جزو
+          نام دسترس‌پذیر ستون است و پیش از **هر سلول** دوباره خوانده می‌شود.
+        */}
+        <caption className="sr-only">{captionText}</caption>
+        <thead className="bg-surface-dim text-xs text-ink-muted">
+          <tr>
+            <th scope="col" className="px-3 py-3 font-semibold">
+              <span className="sr-only">انتخاب</span>
+            </th>
+            <th scope="col" className="px-4 py-3 font-semibold">کسب‌وکار</th>
+            <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
+            <th scope="col" className="px-4 py-3 font-semibold">توان مالی</th>
+            <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
+            <th scope="col" className="px-4 py-3 font-semibold">عملیات</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-surface-line bg-surface">
+          {leads.map((l) => {
+            const panelId = `${idPrefix}-panel-${l.id}`;
+            const refKey = `${idPrefix}:${l.id}`;
+            const open = openId === refKey;
+            return (
+              <Fragment key={l.id}>
+                <tr className="align-top">
+                  <td className="px-3 py-3">
+                    <input
+                      type="checkbox"
+                      id={`${idPrefix}-sel-${l.id}`}
+                      checked={selectedIds.has(l.id)}
+                      onChange={() => onToggleSelect(l.id)}
+                      className="h-6 w-6 accent-brand-600"
+                    />
+                    <label htmlFor={`${idPrefix}-sel-${l.id}`} className="sr-only">
+                      انتخاب {l.businessName}
+                    </label>
+                  </td>
+
+                  <th scope="row" className="px-4 py-3 text-start font-medium text-ink">
+                    <button
+                      type="button"
+                      ref={(el) => {
+                        triggerRefs.current[refKey] = el;
+                      }}
+                      aria-expanded={open}
+                      aria-controls={panelId}
+                      onClick={() => onTogglePanel(l.id, idPrefix)}
+                      className="rounded px-1 py-1 text-start text-brand-700 underline decoration-dotted underline-offset-2 hover:text-brand-600"
+                    >
+                      {l.businessName}
+                    </button>
+                    {/* صنعت زیر نام — به‌جای یک ستون جدا */}
+                    {l.industry && (
+                      <span className="mt-0.5 block px-1 text-xs font-normal text-ink-muted">
+                        {l.industry}
+                      </span>
+                    )}
+                  </th>
+
+                  <td className="px-4 py-3">
+                    <Channels channels={l.contactChannels} businessName={l.businessName} />
+                  </td>
+
+                  <td className="px-4 py-3 text-ink-muted">
+                    {l.affluenceScore != null ? (
+                      <>
+                        <bdi className="font-bold text-ink">{fa(l.affluenceScore)}</bdi>
+                        <span className="sr-only"> از ۱۰۰</span>
+                      </>
+                    ) : (
+                      <>
+                        <span aria-hidden="true">—</span>
+                        <span className="sr-only">محاسبه نشده</span>
+                      </>
+                    )}
+                    {/* امتیاز لید (بعد از تحلیل) زیر توان مالی — نه ستون جدا */}
+                    {l.score != null && (
+                      <span className="mt-0.5 block text-xs">
+                        امتیاز لید: <bdi>{fa(l.score)}</bdi>
+                        <span className="sr-only"> از ۱۰۰</span>
+                      </span>
+                    )}
+                  </td>
+
+                  <td className="px-4 py-3">
+                    <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
+                      {LEAD_STATUS_LABELS[l.status]}
+                    </span>
+                  </td>
+
+                  <td className="px-4 py-3">
+                    {/*
+                      group بدون نام: نام هر دکمه خودش شامل نام کسب‌وکار است،
+                      پس نام‌گذاری گروه باعث می‌شد نام سه بار پشت‌سرهم خوانده شود.
+                    */}
+                    <div role="group" className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        aria-label={`تحلیل لید ${l.businessName}`}
+                        aria-disabled={busyAny}
+                        aria-describedby={busyAny ? "busy-block-note" : undefined}
+                        onClick={() => {
+                          if (busyAny) return;
+                          onAnalyze(l);
+                        }}
+                        className={
+                          busyAny
+                            ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
+                            : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
+                        }
+                      >
+                        {analyzingId === l.id ? "در حال تحلیل…" : "تحلیل لید"}
+                      </button>
+
+                      {/* تولید پیام فقط بعد از تحلیل و امتیازگرفتن — سرور هم چک می‌کند */}
+                      <button
+                        type="button"
+                        aria-label={`تولید پیام اختصاصی برای ${l.businessName}`}
+                        aria-disabled={busyAny || !canMessage(l)}
+                        aria-describedby={
+                          !canMessage(l) ? "msg-gate-note" : busyAny ? "busy-block-note" : undefined
+                        }
+                        onClick={() => {
+                          if (busyAny || !canMessage(l)) return;
+                          onGenerateMessage(l);
+                        }}
+                        className={
+                          busyAny || !canMessage(l)
+                            ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
+                            : "rounded-lg bg-pine px-3 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
+                        }
+                      >
+                        تولید پیام
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+
+                {/* پنل جزئیات — همیشه رندر، فقط hidden جابه‌جا می‌شود */}
+                <tr id={panelId} hidden={!open}>
+                  <td colSpan={6} className="bg-surface-dim px-4 py-5">
+                    <LeadPanel
+                      lead={l}
+                      detail={details[l.id] ?? null}
+                      igDraft={igDrafts[l.id] ?? l.igNote ?? ""}
+                      onIgDraftChange={(v) => onIgDraftChange(l.id, v)}
+                      onSaveIgNote={(v) => onSaveIgNote(l, v)}
+                      onClose={() => onTogglePanel(l.id, idPrefix)}
+                    />
+                  </td>
+                </tr>
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ── کامپوننت اصلی ────────────────────────────────────────── */
 
 export function Studio() {
@@ -541,7 +770,7 @@ export function Studio() {
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
   const [busy, setBusy] = useState<
-    null | "load" | "create" | "discover" | "manual" | "csv" | "affluence"
+    null | "load" | "create" | "discover" | "manual" | "csv" | "affluence" | "shortlist"
   >(null);
 
   // تحلیل لید (فاز ۳)
@@ -549,6 +778,9 @@ export function Studio() {
   const [batchRunning, setBatchRunning] = useState(false);
   const [msgGenRunning, setMsgGenRunning] = useState(false);
   const [igDrafts, setIgDrafts] = useState<Record<string, string>>({});
+  // انتخاب چک‌باکسی — هر جدول Set خودش را دارد تا انتخاب‌ها قاطی نشوند
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [shortSelectedIds, setShortSelectedIds] = useState<Set<string>>(new Set());
   const [remaining, setRemaining] = useState<number | null>(null);
   // کانال اعلان زنده‌ی جدا. nonce لازم است: اگر متن دقیقاً تکراری باشد، React
   // گره‌ی متنی را عوض نمی‌کند و screen reader چیزی اعلام نمی‌کند.
@@ -916,9 +1148,10 @@ export function Studio() {
     setTaskStatus(`تولید پیام برای «${lead.businessName}» شروع شد…`);
     try {
       for (let i = 0; i < 8; i++) {
+        // only:"message" → سرور اگر لید تحلیل‌نشده باشد ۴۰۹ می‌دهد و توکنی خرج نمی‌شود
         const res = await api<{ step: { ran: string; summary: string } | null; done: boolean }>(
           "/api/pipeline",
-          { method: "POST", body: JSON.stringify({ leadId: lead.id, step: true }) }
+          { method: "POST", body: JSON.stringify({ leadId: lead.id, step: true, only: "message" }) }
         );
         if (!res.step) break;
         setTaskStatus(`«${lead.businessName}»: ${res.step.summary}`);
@@ -993,6 +1226,70 @@ export function Studio() {
       await loadMessages(selectedId).catch(() => {});
     } finally {
       setMsgGenRunning(false);
+    }
+  }
+
+  /* ── فهرست منتخب ────────────────────────────────────────── */
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleShortSelect = useCallback((id: string) => {
+    setShortSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  /** لیدهای تیک‌خورده را به فهرست منتخب می‌فرستد (یک درخواست، صفر توکن) */
+  async function addToShortlist() {
+    if (selectedIds.size === 0 || !selectedId) return;
+    setBusy("shortlist");
+    setError("");
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await api<{ updated: number }>("/api/leads", {
+        method: "PATCH",
+        body: JSON.stringify({ ids, shortlisted: true }),
+      });
+      setSelectedIds(new Set());
+      await loadLeads(selectedId);
+      setTaskStatus(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
+      setNotice(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** لیدهای تیک‌خورده‌ی منتخب را به فهرست اصلی برمی‌گرداند */
+  async function removeFromShortlist() {
+    if (shortSelectedIds.size === 0 || !selectedId) return;
+    setBusy("shortlist");
+    setError("");
+    try {
+      const ids = Array.from(shortSelectedIds);
+      const res = await api<{ updated: number }>("/api/leads", {
+        method: "PATCH",
+        body: JSON.stringify({ ids, shortlisted: false }),
+      });
+      setShortSelectedIds(new Set());
+      await loadLeads(selectedId);
+      setTaskStatus(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
+      setNotice(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -1110,13 +1407,19 @@ export function Studio() {
     }
   }, []);
 
-  function togglePanel(leadId: string) {
-    if (openId === leadId) {
+  /**
+   * باز/بسته‌کردن پنل جزئیات.
+   * کلید شامل پیشوند جدول است چون یک لید می‌تواند هم‌زمان در جدول «همه» و
+   * «منتخب» نباشد ولی شناسه‌های DOM باید یکتا بمانند.
+   */
+  function togglePanel(leadId: string, prefix = "all") {
+    const key = `${prefix}:${leadId}`;
+    if (openId === key) {
       setOpenId(null);
-      triggerRefs.current[leadId]?.focus(); // بازگرداندن فوکوس
+      triggerRefs.current[key]?.focus(); // بازگرداندن فوکوس
       return;
     }
-    setOpenId(leadId);
+    setOpenId(key);
     if (!details[leadId]) void loadDetail(leadId);
   }
 
@@ -1192,6 +1495,10 @@ export function Studio() {
 
   /** پیام فقط برای لیدی معنا دارد که تحلیل و امتیازدهی شده و منتظر پیام است */
   const canMessage = (l: Lead) => l.status === "READY_FOR_MESSAGE";
+
+  /** دو فهرست جدا — تیک‌خورده‌ها از فهرست اصلی بیرون می‌روند تا شلوغ نشود */
+  const shortlisted = leads.filter((l) => l.shortlisted);
+  const unshortlisted = leads.filter((l) => !l.shortlisted);
 
   /**
    * لیدهای تحلیل‌نشده‌ای که نمره‌ی توان مالی‌شان کافی است.
@@ -1553,167 +1860,105 @@ export function Studio() {
 
       {/* ── لیدها ── */}
       <section aria-labelledby="leads-heading">
-        <h2 id="leads-heading" className="mb-4 text-lg font-extrabold text-ink">
-          لیدها ({leads.length})
-        </h2>
-
-        {leads.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-surface-line bg-surface-dim p-6 text-center text-sm text-ink-muted">
-            {busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
-          </p>
-        ) : (
-          <div
-            role="region"
-            aria-label="جدول لیدها"
-            tabIndex={0}
-            className="overflow-x-auto rounded-xl border border-surface-line shadow-card"
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 id="leads-heading" className="text-lg font-extrabold text-ink">
+            همه‌ی لیدها ({fa(leads.length)})
+          </h2>
+          <button
+            type="button"
+            onClick={() => {
+              if (selectedIds.size === 0 || busy === "shortlist") return;
+              void addToShortlist();
+            }}
+            aria-disabled={selectedIds.size === 0 || busy === "shortlist"}
+            aria-describedby="shortlist-hint"
+            className={
+              selectedIds.size === 0 || busy === "shortlist"
+                ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                : "rounded-lg bg-brass-dark px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brass"
+            }
           >
-            <table className="w-full min-w-[860px] border-collapse text-start text-sm">
-              {/*
-                توضیح ستون «توان مالی» عمداً اینجاست نه در <th>: محتوای th جزو
-                نام دسترس‌پذیر ستون است و پیش از **هر سلول** دوباره خوانده می‌شود.
-                caption یک‌بار هنگام ورود به جدول خوانده می‌شود.
-              */}
-              <caption className="sr-only">
-                فهرست لیدهای کشف‌شده‌ی کمپین. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه
-                درآمد واقعی.
-              </caption>
-              <thead className="bg-surface-dim text-xs text-ink-muted">
-                <tr>
-                  <th scope="col" className="px-4 py-3 font-semibold">کسب‌وکار</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">صنعت</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">شهر</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">تلفن</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">امتیاز</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">توان مالی</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">عملیات</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-surface-line bg-surface">
-                {leads.map((l) => (
-                  <Fragment key={l.id}>
-                    <tr className="align-top">
-                      <th scope="row" className="px-4 py-3 text-start font-medium text-ink">
-                        <button
-                          type="button"
-                          ref={(el) => {
-                            triggerRefs.current[l.id] = el;
-                          }}
-                          aria-expanded={openId === l.id}
-                          aria-controls={`lead-panel-${l.id}`}
-                          onClick={() => togglePanel(l.id)}
-                          className="rounded px-1 py-1 text-start text-brand-700 underline decoration-dotted underline-offset-2 hover:text-brand-600"
-                        >
-                          {l.businessName}
-                        </button>
-                        {l.website && (
-                          <a
-                            href={l.website}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="ms-2 inline-block px-1 py-1 text-xs text-ink-muted underline underline-offset-2 hover:text-brand-600"
-                          >
-                            سایت
-                            <span className="sr-only"> {l.businessName} (در تب جدید باز می‌شود)</span>
-                          </a>
-                        )}
-                      </th>
-                      <td className="px-4 py-3 text-ink-muted">{l.industry ?? "—"}</td>
-                      <td className="px-4 py-3 text-ink-muted">{l.city ?? "—"}</td>
-                      <td className="px-4 py-3 text-ink-muted" dir="ltr">{l.phone ?? "—"}</td>
-                      <td className="px-4 py-3">
-                        <Channels channels={l.contactChannels} businessName={l.businessName} />
-                      </td>
-                      <td className="px-4 py-3 text-ink-muted">
-                        {l.score != null ? <bdi>{fa(l.score)}</bdi> : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-ink-muted">
-                        {l.affluenceScore != null ? (
-                          <>
-                            <bdi>{fa(l.affluenceScore)}</bdi>
-                            <span className="sr-only"> از ۱۰۰</span>
-                          </>
-                        ) : (
-                          <>
-                            <span aria-hidden="true">—</span>
-                            <span className="sr-only">محاسبه نشده</span>
-                          </>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
-                          {LEAD_STATUS_LABELS[l.status]}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        {/*
-                          group بدون نام: نام هر دکمه خودش شامل نام کسب‌وکار است،
-                          پس نام‌گذاری گروه باعث می‌شد نام سه بار پشت‌سرهم خوانده شود.
-                        */}
-                        <div role="group" className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            aria-label={`تحلیل لید ${l.businessName}`}
-                            aria-disabled={busyAny}
-                            aria-describedby={busyAny ? "busy-block-note" : undefined}
-                            onClick={() => {
-                              if (busyAny) return;
-                              void analyze(l);
-                            }}
-                            className={
-                              busyAny
-                                ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
-                                : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
-                            }
-                          >
-                            {analyzingId === l.id ? "در حال تحلیل…" : "تحلیل لید"}
-                          </button>
+            {busy === "shortlist"
+              ? "در حال افزودن…"
+              : `افزودن ${fa(selectedIds.size)} لید انتخاب‌شده به فهرست منتخب`}
+          </button>
+        </div>
+        <p id="shortlist-hint" className="mb-4 text-xs leading-6 text-ink-muted">
+          لیدها از بالاترین توان مالی مرتب شده‌اند. آن‌هایی را که به‌نظرت ارزش دارند تیک بزن و به
+          «فهرست منتخب» بفرست؛ آنجا بدون شلوغیِ بقیه‌ی لیدها روی همان‌ها کار می‌کنی.
+        </p>
 
-                          {/* تولید پیام فقط بعد از امتیازگرفتن معنا دارد */}
-                          <button
-                            type="button"
-                            aria-label={`تولید پیام اختصاصی برای ${l.businessName}`}
-                            aria-disabled={busyAny || !canMessage(l)}
-                            aria-describedby={
-                              !canMessage(l) ? "msg-gate-note" : busyAny ? "busy-block-note" : undefined
-                            }
-                            onClick={() => {
-                              if (busyAny || !canMessage(l)) return;
-                              void generateMessageFor(l);
-                            }}
-                            className={
-                              busyAny || !canMessage(l)
-                                ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
-                                : "rounded-lg bg-pine px-3 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
-                            }
-                          >
-                            تولید پیام
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+        <LeadsTable
+          leads={unshortlisted}
+          captionText="همه‌ی لیدهای کشف‌شده‌ی کمپین که هنوز به فهرست منتخب نرفته‌اند. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه درآمد واقعی."
+          emptyText={busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
+          idPrefix="all"
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
+          openId={openId}
+          onTogglePanel={togglePanel}
+          triggerRefs={triggerRefs}
+          details={details}
+          igDrafts={igDrafts}
+          onIgDraftChange={(id, v) => setIgDrafts((p) => ({ ...p, [id]: v }))}
+          onSaveIgNote={(l, v) => void saveIgNote(l.id, l.businessName, v)}
+          busyAny={busyAny}
+          analyzingId={analyzingId}
+          canMessage={canMessage}
+          onAnalyze={(l) => void analyze(l)}
+          onGenerateMessage={(l) => void generateMessageFor(l)}
+        />
+      </section>
 
-                    {/* پنل جزئیات — همیشه رندر، فقط hidden جابه‌جا می‌شود */}
-                    <tr id={`lead-panel-${l.id}`} hidden={openId !== l.id}>
-                      <td colSpan={9} className="bg-surface-dim px-4 py-5">
-                        <LeadPanel
-                          lead={l}
-                          detail={details[l.id] ?? null}
-                          igDraft={igDrafts[l.id] ?? l.igNote ?? ""}
-                          onIgDraftChange={(v) => setIgDrafts((p) => ({ ...p, [l.id]: v }))}
-                          onSaveIgNote={(v) => void saveIgNote(l.id, l.businessName, v)}
-                          onClose={() => togglePanel(l.id)}
-                        />
-                      </td>
-                    </tr>
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      {/* ── فهرست منتخب — فضای کار روی لیدهای تأییدشده‌ی انسان ── */}
+      <section aria-labelledby="shortlist-heading">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 id="shortlist-heading" className="text-lg font-extrabold text-ink">
+            فهرست منتخب ({fa(shortlisted.length)})
+          </h2>
+          {shortlisted.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (shortSelectedIds.size === 0 || busy === "shortlist") return;
+                void removeFromShortlist();
+              }}
+              aria-disabled={shortSelectedIds.size === 0 || busy === "shortlist"}
+              className={
+                shortSelectedIds.size === 0 || busy === "shortlist"
+                  ? "rounded-lg border border-ink-muted bg-surface px-4 py-2 text-sm font-bold text-ink-muted"
+                  : "rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
+              }
+            >
+              برگرداندن {fa(shortSelectedIds.size)} لید به فهرست اصلی
+            </button>
+          )}
+        </div>
+        <p className="mb-4 text-xs leading-6 text-ink-muted">
+          اینجا هر لید را جدا تحلیل کن و بعد پیامش را بساز. دکمه‌ی «تولید پیام» تا وقتی لید تحلیل و
+          امتیازدهی نشده باشد کار نمی‌کند — سرور هم جلویش را می‌گیرد، نه فقط این صفحه.
+        </p>
+
+        <LeadsTable
+          leads={shortlisted}
+          captionText="لیدهای منتخب. اینجا هر لید را جدا تحلیل و پیام‌سازی می‌کنی."
+          emptyText="هنوز لیدی انتخاب نکرده‌ای. از جدول بالا تیک بزن و «افزودن به فهرست منتخب» را بزن."
+          idPrefix="short"
+          selectedIds={shortSelectedIds}
+          onToggleSelect={toggleShortSelect}
+          openId={openId}
+          onTogglePanel={togglePanel}
+          triggerRefs={triggerRefs}
+          details={details}
+          igDrafts={igDrafts}
+          onIgDraftChange={(id, v) => setIgDrafts((p) => ({ ...p, [id]: v }))}
+          onSaveIgNote={(l, v) => void saveIgNote(l.id, l.businessName, v)}
+          busyAny={busyAny}
+          analyzingId={analyzingId}
+          canMessage={canMessage}
+          onAnalyze={(l) => void analyze(l)}
+          onGenerateMessage={(l) => void generateMessageFor(l)}
+        />
       </section>
 
       {/* ── پیام‌ها (تأیید انسانی — فاز ۴) ── */}

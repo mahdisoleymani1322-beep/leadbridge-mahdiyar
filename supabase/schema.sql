@@ -47,6 +47,9 @@ create table if not exists leads (
   -- یافته‌ی دستی بررسی پیج اینستاگرام (تا وقتی IG_ACCESS_TOKEN ست نشده)
   ig_note           text,
   ig_note_at        timestamptz,
+  -- انتخاب دستی انسان برای «فهرست منتخب» — بُعدی مستقل از status
+  shortlisted       boolean not null default false,
+  shortlisted_at    timestamptz,
   do_not_contact    boolean not null default false,
   -- کلید یکتاسازی برای حذف تکراری قطعی (place_id یا تلفن نرمال‌شده)
   dedup_key         text not null unique,

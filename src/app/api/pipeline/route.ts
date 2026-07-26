@@ -34,6 +34,29 @@ export async function POST(req: NextRequest) {
     // force: دروازه‌ی توان مالی نادیده گرفته می‌شود. کلیک انسان روی یک ردیف
     // مشخص، اراده‌ی صریح است و بر غربال خودکار مقدم.
     if (typeof body.leadId === "string" && body.leadId && body.step === true) {
+      /*
+        گارد سرور برای «تولید پیام».
+
+        دکمه‌ی تولید پیام همین endpoint را صدا می‌زند، پس بدون این چک یک لید
+        تحلیل‌نشده به‌جای پیام **تحلیل** می‌شد و سهمیه‌ی مدل بی‌اجازه خرج
+        می‌شد. قفلِ سمت کلاینت (aria-disabled) فقط UI است؛ تصمیم خرج توکن
+        باید سمت سرور گرفته شود.
+      */
+      if (body.only === "message") {
+        const lead = await getStore().getLead(body.leadId);
+        if (!lead) return Response.json({ error: "لید یافت نشد." }, { status: 404 });
+        if (lead.status !== "READY_FOR_MESSAGE") {
+          return Response.json(
+            {
+              error:
+                `تولید پیام برای «${lead.businessName}» ممکن نیست: هنوز تحلیل و امتیازدهی نشده ` +
+                `(وضعیت فعلی: ${lead.status}). اول «تحلیل لید» را بزنید.`,
+            },
+            { status: 409 }
+          );
+        }
+      }
+
       const step = await runLeadStep(body.leadId, { force: body.force === true });
       return Response.json({ step, done: step.done });
     }

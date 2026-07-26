@@ -114,6 +114,16 @@ export type Lead = {
    */
   igNote: string | null;
   igNoteAt: string | null;
+  /**
+   * لید را انسان دستی به «فهرست منتخب» فرستاده.
+   *
+   * چرا جدا از status: انتخاب انسانی یک **بُعد مستقل** از وضعیت پردازش است.
+   * یک لید می‌تواند هم‌زمان منتخب و در هر مرحله‌ای از خط تولید باشد. اگر آن را
+   * وارد State Machine می‌کردیم، هر انتخاب یا لغو انتخاب مسیر پردازش را
+   * به‌هم می‌ریخت.
+   */
+  shortlisted: boolean;
+  shortlistedAt: string | null;
   doNotContact: boolean;
   /** کلید یکتاسازی برای حذف تکراری (place_id یا تلفن نرمال‌شده) */
   dedupKey: string;
