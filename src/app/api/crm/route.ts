@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getStore } from "@/lib/store";
-import type { AgentRun, AuditEntry, Lead, LeadStatus } from "@/lib/store/types";
+import type { AgentRun, AuditEntry, Lead, LeadStatus, Message } from "@/lib/store/types";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { AUDIT_LABELS } from "@/lib/audit";
 import { marketLabel } from "@/lib/config";
@@ -47,28 +47,43 @@ const ANALYZED: LeadStatus[] = [
   "NURTURE",
   "REJECTED",
 ];
-const HAS_MESSAGE: LeadStatus[] = [
-  "MESSAGE_DRAFTED",
-  "MESSAGE_REVIEW",
-  "APPROVED",
-  "SENT",
-  "REPLIED",
-  "HANDOVER_READY",
-  "HANDED_OVER",
-];
-const APPROVED_ON: LeadStatus[] = ["APPROVED", "SENT", "REPLIED", "HANDOVER_READY", "HANDED_OVER"];
 const SENT_ON: LeadStatus[] = ["SENT", "REPLIED", "HANDOVER_READY", "HANDED_OVER"];
 const REPLIED_ON: LeadStatus[] = ["REPLIED", "HANDOVER_READY", "HANDED_OVER"];
 
-function funnelOf(leads: Lead[]) {
+/**
+ * قیف تبدیل — تعریف قطعی، صفر توکن.
+ *
+ * ⚠️ پله‌های «پیام‌دار / تأییدشده / ارسال‌شده» از جدول **messages** خوانده
+ * می‌شوند، نه از وضعیت لید. نسخه‌ی اول از وضعیت لید می‌خواند و روی داده‌ی واقعی
+ * غلط درآمد: یک پیام با نمره‌ی ۸۲ وجود داشت ولی لیدش هنوز READY_FOR_MESSAGE بود،
+ * چون جریان بین ساخت پیام و به‌روزرسانی وضعیت (با خطای سهمیه) قطع شده بود.
+ *
+ * مشکل دوم و مهم‌تر: وضعیت لید **بازنویسی می‌شود**. اگر پیامی رد شود لید به
+ * REJECTED می‌رود و از شمارش «پیام‌دار» بیرون می‌افتد — یعنی قیف تعداد پیام‌های
+ * واقعاً تولیدشده را کمتر از واقع نشان می‌داد. `messages.status` مستقل است و
+ * این اتفاق برایش نمی‌افتد.
+ *
+ * پله‌های «پاسخ‌داده/تبدیل‌شده» از وضعیت لید می‌آیند چون منبعشان
+ * `/api/conversations` است که خودش همان وضعیت را می‌نویسد.
+ */
+function funnelOf(leads: Lead[], messages: Message[]) {
   const n = (list: LeadStatus[]) => leads.filter((l) => list.includes(l.status)).length;
+  const leadIds = new Set(leads.map((l) => l.id));
+  const scoped = messages.filter((m) => leadIds.has(m.leadId));
+  const leadsWith = (pick: (m: Message) => boolean) =>
+    new Set(scoped.filter(pick).map((m) => m.leadId)).size;
+
   return [
     { key: "discovered", label: "کشف‌شده", count: leads.length },
     { key: "shortlisted", label: "منتخب", count: leads.filter((l) => l.shortlisted).length },
     { key: "analyzed", label: "تحلیل‌شده", count: n(ANALYZED) },
-    { key: "messaged", label: "پیام‌دار", count: n(HAS_MESSAGE) },
-    { key: "approved", label: "تأییدشده", count: n(APPROVED_ON) },
-    { key: "sent", label: "ارسال‌شده", count: n(SENT_ON) },
+    { key: "messaged", label: "پیام‌دار", count: leadsWith(() => true) },
+    {
+      key: "approved",
+      label: "تأییدشده",
+      count: leadsWith((m) => m.status === "approved" || m.status === "sent"),
+    },
+    { key: "sent", label: "ارسال‌شده", count: leadsWith((m) => m.status === "sent") },
     { key: "replied", label: "پاسخ‌داده", count: n(REPLIED_ON) },
     { key: "converted", label: "تبدیل‌شده", count: n(["HANDED_OVER"]) },
   ];
@@ -97,11 +112,14 @@ export async function GET(req: NextRequest) {
   const store = getStore();
   const range = { from, to };
 
-  const [allCampaigns, audit, runs, conversations] = await Promise.all([
+  const [allCampaigns, audit, runs, conversations, allMessages] = await Promise.all([
     store.listCampaigns(),
     store.listAudit({ ...range, limit: 400 }),
     store.listAgentRunsBetween({ ...range, campaignId, limit: 400 }),
     store.listConversations({ limit: 500 }),
+    // بدون فیلتر بازه: پیام ممکن است بعد از بازه‌ی کشفِ لید ساخته شده باشد و
+    // قیف باید سرنوشت **همان لیدها** را نشان دهد، نه فقط پیام‌های داخل بازه.
+    store.listMessages(),
   ]);
 
   // لیدهای بازه (برای آمار) و لیدهای کل (برای نام‌بردن در رویدادها)
@@ -166,6 +184,9 @@ export async function GET(req: NextRequest) {
   events.sort((a, b) => b.at.localeCompare(a.at));
 
   /* ── آمار کمپین‌های بازه ── */
+  const sentLeadIds = new Set(
+    allMessages.filter((m) => m.status === "sent").map((m) => m.leadId)
+  );
   const campaignStats = campaigns.map((c) => {
     const own = scopedLeads.filter((l) => l.campaignId === c.id);
     return {
@@ -176,7 +197,8 @@ export async function GET(req: NextRequest) {
       createdAt: c.createdAt,
       leads: own.length,
       shortlisted: own.filter((l) => l.shortlisted).length,
-      sent: own.filter((l) => SENT_ON.includes(l.status)).length,
+      // مثل قیف: از جدول پیام‌ها، نه وضعیت لید (که بازنویسی می‌شود)
+      sent: own.filter((l) => sentLeadIds.has(l.id)).length,
       converted: own.filter((l) => l.status === "HANDED_OVER").length,
     };
   });
@@ -184,8 +206,11 @@ export async function GET(req: NextRequest) {
   /* ── پیگیری‌ها: ارسال‌شده بدون پاسخ + سررسیدشده ── */
   const convByLead = new Map(conversations.map((c) => [c.leadId, c]));
   const nowIso = new Date().toISOString();
+  // «ارسال‌شده» = پیامش sent است **یا** وضعیت لید جلوتر رفته. شرط دوم لازم است
+  // چون لید ممکن است از مسیر ثبت پاسخ جلو رفته باشد؛ شرط اول لازم است چون
+  // وضعیت لید ممکن است به‌خاطر قطع‌شدن جریان عقب مانده باشد.
   const followUps = scopedLeads
-    .filter((l) => SENT_ON.includes(l.status))
+    .filter((l) => sentLeadIds.has(l.id) || SENT_ON.includes(l.status))
     .map((l) => {
       const c = convByLead.get(l.id) ?? null;
       return {
@@ -206,7 +231,7 @@ export async function GET(req: NextRequest) {
 
   return Response.json({
     range: { from: from ?? null, to: to ?? null },
-    funnel: funnelOf(leadsInRange),
+    funnel: funnelOf(leadsInRange, allMessages),
     totals: {
       events: events.length,
       campaigns: campaigns.length,
