@@ -44,6 +44,12 @@ export type LeadStatus =
   | "INVALID"
   | "DUPLICATE"
   | "ANALYZING"
+  /**
+   * دروازه‌ی توان مالی نگه‌اش داشت — **هیچ توکنی خرج نشده**.
+   * جدا از NURTURE است: NURTURE نتیجه‌ی یک تحلیل واقعی است، این یعنی هنوز
+   * تحلیل نشده و سهمیه‌ی مدل صرف لیدهای بهتر شده. همیشه قابل تحلیل دستی است.
+   */
+  | "LOW_VALUE"
   | "SCORED"
   | "REJECTED"
   | "NURTURE"

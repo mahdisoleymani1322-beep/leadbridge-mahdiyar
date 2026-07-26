@@ -35,7 +35,7 @@ create table if not exists leads (
   rating            real,
   reviews_count     int,
   status            text not null default 'NEW' check (status in (
-                      'NEW','VALIDATING','INVALID','DUPLICATE','ANALYZING','SCORED',
+                      'NEW','VALIDATING','INVALID','DUPLICATE','ANALYZING','LOW_VALUE','SCORED',
                       'REJECTED','NURTURE','READY_FOR_MESSAGE','MESSAGE_DRAFTED',
                       'MESSAGE_REVIEW','APPROVED','SENT','REPLIED','HANDOVER_READY','HANDED_OVER')),
   score             int,

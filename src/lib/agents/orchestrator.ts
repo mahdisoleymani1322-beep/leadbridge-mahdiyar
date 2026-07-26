@@ -11,7 +11,7 @@ import { runPortfolioSelect } from "./portfolio-select";
 import { runMessageWriter } from "./message-writer";
 import { runMessageCritic } from "./message-critic";
 import { checkPolicy } from "./policy-guard";
-import { CRITIC_THRESHOLDS, MAX_REVISION_ROUNDS } from "@/lib/config";
+import { CRITIC_THRESHOLDS, MAX_REVISION_ROUNDS, AFFLUENCE_THRESHOLDS } from "@/lib/config";
 import type { Message } from "@/lib/store";
 import type { LeadAnalysisOutput, ServiceMatchOutput, PortfolioSelectOutput } from "./types";
 
@@ -57,6 +57,7 @@ export type StepResult = {
   leadId: string;
   /** گامی که همین حالا اجرا شد */
   ran:
+    | "affluence-gate"
     | "analysis"
     | "service-match"
     | "portfolio-select"
@@ -72,8 +73,16 @@ export type StepResult = {
   summary: string;
 };
 
-/** یک گام از پردازش لید را اجرا می‌کند و وضعیت بعدی را برمی‌گرداند. */
-export async function runLeadStep(leadId: string): Promise<StepResult> {
+/**
+ * یک گام از پردازش لید را اجرا می‌کند و وضعیت بعدی را برمی‌گرداند.
+ *
+ * @param opts.force دروازه‌ی توان مالی را نادیده بگیر. دکمه‌ی «تحلیل لید» هر
+ *   ردیف این را می‌فرستد: اراده‌ی صریح انسان بر غربال خودکار مقدم است.
+ */
+export async function runLeadStep(
+  leadId: string,
+  opts: { force?: boolean } = {}
+): Promise<StepResult> {
   const store = getStore();
   const lead = await store.getLead(leadId);
   if (!lead) throw new Error("لید یافت نشد.");
@@ -99,6 +108,40 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
     });
   };
 
+  // ── گام ۰: دروازه‌ی توان مالی — **صفر توکن، پیش از هر فراخوان مدل** ──
+  //
+  // چرا اینجا و نه بعد از تحلیل: هر لید ضعیفی که تحلیل شود یک فراخوان از
+  // سهمیه‌ی ۵۰ درخواستِ روزانه را می‌سوزاند. غربال رایگان اول، خرج توکن بعد.
+  if (!existing) {
+    if (lead.affluenceScore == null) {
+      const aff = scoreAffluence(lead);
+      await store.updateLead(leadId, {
+        affluenceScore: aff.score,
+        affluenceSignals: aff.signals,
+      });
+      lead.affluenceScore = aff.score;
+      lead.affluenceSignals = aff.signals;
+    }
+
+    if (!opts.force && (lead.affluenceScore ?? 0) < AFFLUENCE_THRESHOLDS.analyze) {
+      await store.updateLead(leadId, { status: "LOW_VALUE" });
+      await logRun(
+        "affluence-gate",
+        "done",
+        `توان مالی ${lead.affluenceScore} زیر آستانه‌ی ${AFFLUENCE_THRESHOLDS.analyze} — تحلیل نشد (صفر توکن).`,
+        { affluenceScore: lead.affluenceScore, signals: lead.affluenceSignals }
+      );
+      return {
+        leadId,
+        ran: "affluence-gate",
+        status: "LOW_VALUE",
+        score: null,
+        done: true,
+        summary: `توان مالی ${lead.affluenceScore} از ۱۰۰ — زیر آستانه، سهمیه‌ی مدل صرف لیدهای بهتر شد.`,
+      };
+    }
+  }
+
   // ── گام ۱: تحلیل + امتیازدهی (اگر هنوز تحلیل نشده) ──
   if (!existing) {
     await store.updateLead(leadId, { status: "ANALYZING" });
@@ -107,10 +150,9 @@ export async function runLeadStep(leadId: string): Promise<StepResult> {
         ? await businessDiscovery(lead.instagramHandle)
         : null;
 
-    // توان مالی — صفر توکن. اگر هنگام کشف محاسبه نشده (مثل لیدهای دستی یا
-    // لیدهای قدیمیِ قبل از فاز ۵)، همین حالا حساب می‌شود.
-    if (lead.affluenceScore == null) {
-      const aff = scoreAffluence(lead, { instagramFollowers: igProfile?.followersCount ?? null });
+    // اگر داده‌ی اینستاگرام آمد، نمره‌ی توان مالی را با فالوئر دقیق‌تر کن
+    if (igProfile?.followersCount != null) {
+      const aff = scoreAffluence(lead, { instagramFollowers: igProfile.followersCount });
       await store.updateLead(leadId, {
         affluenceScore: aff.score,
         affluenceSignals: aff.signals,

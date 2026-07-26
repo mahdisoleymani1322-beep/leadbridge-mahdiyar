@@ -15,6 +15,7 @@ import {
   MARKETS,
   SCORING_WEIGHTS,
   CRITIC_THRESHOLDS,
+  AFFLUENCE_THRESHOLDS,
   messageLengthFor,
   type ScoringCriterion,
 } from "@/lib/config";
@@ -30,6 +31,7 @@ const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
   INVALID: "نامعتبر",
   DUPLICATE: "تکراری",
   ANALYZING: "در حال تحلیل",
+  LOW_VALUE: "کم‌ارزش — تحلیل نشد",
   SCORED: "امتیازدهی‌شده",
   REJECTED: "رد شده",
   NURTURE: "نگه‌داری",
@@ -538,7 +540,9 @@ export function Studio() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
-  const [busy, setBusy] = useState<null | "load" | "create" | "discover" | "manual" | "csv">(null);
+  const [busy, setBusy] = useState<
+    null | "load" | "create" | "discover" | "manual" | "csv" | "affluence"
+  >(null);
 
   // تحلیل لید (فاز ۳)
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
@@ -620,7 +624,9 @@ export function Studio() {
   const loadLeads = useCallback(async (campaignId: string) => {
     const q = campaignId ? `?campaignId=${encodeURIComponent(campaignId)}` : "";
     const { leads } = await api<{ leads: Lead[] }>(`/api/leads${q}`);
-    setLeads(leads);
+    // نزولی بر اساس توان مالی: صف کار باید از ارزشمندترین شروع شود، چون همان
+    // ترتیبی است که تحلیل گروهی هم روی سرور رعایت می‌کند.
+    setLeads([...leads].sort((a, b) => (b.affluenceScore ?? -1) - (a.affluenceScore ?? -1)));
     // شمارنده‌ی «تحلیل‌نشده» از همین داده محاسبه می‌شود (بدون درخواست اضافه)
     setRemaining(leads.filter((l) => l.status === "NEW").length);
   }, []);
@@ -714,23 +720,31 @@ export function Studio() {
     }
   }
 
-  /** اجرای خط تولید تحلیل روی یک لید (ایجنت‌های فاز ۳) */
+  /**
+   * تحلیل یک لید — دکمه‌ی هر ردیف.
+   *
+   * `force: true` می‌فرستد تا **دروازه‌ی توان مالی نادیده گرفته شود**: کلیک انسان
+   * روی یک ردیف مشخص اراده‌ی صریح است و بر غربال خودکار مقدم. پس با این دکمه
+   * می‌توان لید «کم‌ارزش» را هم تحلیل کرد.
+   */
   async function analyze(lead: Lead) {
-    if (analyzingId || batchRunning) return; // گارد: یکی در یک زمان (rate-limit مدل)
+    if (busyAny) return; // گارد: یک کار مدل‌محور در یک زمان (rate-limit مدل)
     setAnalyzingId(lead.id);
     setError("");
-    setTaskStatus(`تحلیل «${lead.businessName}» شروع شد. این کار ممکن است تا یک دقیقه طول بکشد.`);
+    setTaskStatus(`تحلیل «${lead.businessName}» شروع شد…`);
     try {
-      const res = await api<{ results: { finalStatus: LeadStatus; score: number | null }[] }>(
-        "/api/pipeline",
-        { method: "POST", body: JSON.stringify({ leadId: lead.id }) }
-      );
-      const r = res.results[0];
-      setTaskStatus(
-        `تحلیل «${lead.businessName}» کامل شد. امتیاز ${r?.score != null ? fa(r.score) : "—"} از ۱۰۰ — وضعیت: ${
-          r ? LEAD_STATUS_LABELS[r.finalStatus] : "نامشخص"
-        }.`
-      );
+      let last = "";
+      for (let i = 0; i < 8; i++) {
+        const res = await api<{ step: { ran: string; status: LeadStatus; score: number | null; summary: string } | null; done: boolean }>(
+          "/api/pipeline",
+          { method: "POST", body: JSON.stringify({ leadId: lead.id, step: true, force: true }) }
+        );
+        if (!res.step) break;
+        last = res.step.summary;
+        setTaskStatus(`«${lead.businessName}»: ${res.step.summary}`);
+        if (res.done) break;
+      }
+      setTaskStatus(`تحلیل «${lead.businessName}» کامل شد. ${last}`);
       if (selectedId) {
         await loadLeads(selectedId);
         await loadMessages(selectedId);
@@ -742,6 +756,43 @@ export function Studio() {
       setTaskStatus("");
     } finally {
       setAnalyzingId(null);
+    }
+  }
+
+  /**
+   * محاسبه‌ی توان مالی همه‌ی لیدهای کمپین — **صفر توکن، یک درخواست**.
+   *
+   * این کار را پیش از تحلیل گروهی بزن: بعدش می‌بینی کدام لیدها ارزش خرج توکن
+   * دارند و کدام‌ها نه، بدون اینکه یک درخواست هم از سهمیه رفته باشد.
+   */
+  async function computeAffluence() {
+    if (!selectedId || busyAny || busy === "affluence") return;
+    setBusy("affluence");
+    setError("");
+    setNotice("");
+    setTaskStatus("محاسبه‌ی توان مالی شروع شد. این کار هیچ توکنی مصرف نمی‌کند.");
+    try {
+      const res = await api<{
+        scored: number;
+        total: number;
+        worthAnalyzing: number;
+        threshold: number;
+      }>("/api/pipeline", {
+        method: "POST",
+        body: JSON.stringify({ campaignId: selectedId, only: "affluence" }),
+      });
+      await loadLeads(selectedId);
+      const msg =
+        `توان مالی محاسبه شد: ${fa(res.scored)} لید نمره‌ی تازه گرفت. ` +
+        `از ${fa(res.total)} لید، ${fa(res.worthAnalyzing)} تا نمره‌ی ${fa(res.threshold)} یا بالاتر دارند و ارزش تحلیل دارند؛ ` +
+        `${fa(res.total - res.worthAnalyzing)} تا کم‌ارزش‌اند و تحلیل گروهی سراغشان نمی‌رود.`;
+      setNotice(msg);
+      setTaskStatus(msg);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setTaskStatus("");
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -771,11 +822,13 @@ export function Studio() {
 
     let analyzed = 0; // تعداد لیدهایی که تحلیلشان کامل شد
     let drafted = 0; // تعداد پیام‌هایی که پیش‌نویس شد
+    let skipped = 0; // لیدهایی که دروازه‌ی توان مالی کنار گذاشت (بدون مصرف توکن)
     try {
       for (let i = 0; i < MAX_STEPS; i++) {
         const res = await api<{
           step: { ran: string; status: string; score: number | null } | null;
           businessName?: string;
+          affluenceScore?: number | null;
           remaining: number;
           done: boolean;
         }>("/api/pipeline", {
@@ -786,6 +839,16 @@ export function Studio() {
         if (res.done || !res.step) break; // چیزی برای پردازش نمانده
 
         setRemaining(res.remaining);
+
+        // دروازه‌ی توان مالی — صفر توکن، لید کنار گذاشته شد
+        if (res.step.ran === "affluence-gate") {
+          skipped++;
+          setTaskStatus(
+            `«${res.businessName ?? "لید"}» با توان مالی ${fa(res.affluenceScore ?? 0)} کنار گذاشته شد (بدون مصرف توکن). ` +
+              `${fa(res.remaining)} لید باقی مانده.`
+          );
+          await loadLeads(selectedId).catch(() => {});
+        }
 
         // فقط وقتی یک لید تحلیل و امتیازدهی شد اعلام کن (نه هر گام ریز)
         if (res.step.ran === "analysis") {
@@ -819,7 +882,11 @@ export function Studio() {
       await loadLeads(selectedId);
       await loadMessages(selectedId).catch(() => {});
       setTaskStatus(
-        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. جدول لیدها و بخش پیام‌ها به‌روزرسانی شد.`
+        `تحلیل گروهی تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. ` +
+          (skipped > 0
+            ? `${fa(skipped)} لید کم‌ارزش بدون مصرف توکن کنار گذاشته شد. `
+            : "") +
+          "جدول لیدها و بخش پیام‌ها به‌روزرسانی شد."
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1126,6 +1193,14 @@ export function Studio() {
   /** پیام فقط برای لیدی معنا دارد که تحلیل و امتیازدهی شده و منتظر پیام است */
   const canMessage = (l: Lead) => l.status === "READY_FOR_MESSAGE";
 
+  /**
+   * لیدهای تحلیل‌نشده‌ای که نمره‌ی توان مالی‌شان کافی است.
+   * آستانه از config می‌آید تا با سرور یکی باشد.
+   */
+  const worthAnalyzingCount = leads.filter(
+    (l) => l.status === "NEW" && (l.affluenceScore ?? 0) >= AFFLUENCE_THRESHOLDS.analyze
+  ).length;
+
   /** لیدهای آماده‌ی پیام در کمپین انتخابی */
   const readyForMessageCount = leads.filter(canMessage).length;
   /** آیا هنوز لید تحلیل‌نشده‌ای مانده؟ (شرط فعال‌شدن دکمه‌ی گروهی) */
@@ -1296,6 +1371,24 @@ export function Studio() {
               {busy === "discover" ? "در حال کشف لید…" : "کشف لید برای کمپین انتخابی 🔎"}
             </button>
 
+            {/* رایگان — قبل از تحلیل گروهی بزن تا بدانی کدام لیدها ارزش توکن دارند */}
+            <button
+              type="button"
+              onClick={() => {
+                if (!selectedId || busyAny || busy === "affluence") return;
+                void computeAffluence();
+              }}
+              aria-disabled={!selectedId || busyAny || busy === "affluence"}
+              aria-describedby="affluence-note"
+              className={
+                !selectedId || busyAny || busy === "affluence"
+                  ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                  : "rounded-lg border border-brand-400 bg-surface px-5 py-2.5 text-sm font-bold text-brand-700 shadow-card transition-colors hover:bg-brand-50"
+              }
+            >
+              {busy === "affluence" ? "در حال محاسبه…" : "محاسبه‌ی توان مالی (رایگان)"}
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -1316,12 +1409,17 @@ export function Studio() {
         </div>
 
         {/* وضعیت ماندگار (نه اعلان زنده) — با aria-describedby روی دکمه خوانده می‌شود */}
+        <p id="affluence-note" className="mb-1 text-xs leading-6 text-ink-muted">
+          محاسبه‌ی توان مالی هیچ توکنی مصرف نمی‌کند. اول این را بزن: بعدش می‌بینی کدام لیدها ارزش
+          خرج توکن دارند. تحلیل گروهی هم لیدها را از ارزشمندترین شروع می‌کند و لیدهای زیر آستانه را
+          کنار می‌گذارد (بدون پاک‌کردن — با دکمه‌ی «تحلیل لید» همان ردیف می‌توانی دستی تحلیلشان کنی).
+        </p>
         <p id="batch-remaining" className="mb-4 text-xs text-ink-muted">
           {!selectedId
             ? "ابتدا یک کمپین انتخاب کنید."
             : remaining === null
-              ? "همه‌ی لیدها یکی‌یکی و پشت‌سرهم تحلیل می‌شوند (هر لید حدود نیم دقیقه)."
-              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده. با یک بار زدن، همه یکی‌یکی تا آخر تحلیل می‌شوند (هر لید حدود نیم دقیقه).`}
+              ? "لیدها از ارزشمندترین به کم‌ارزش‌ترین یکی‌یکی تحلیل می‌شوند (هر لید حدود نیم دقیقه)."
+              : `${fa(remaining)} لید تحلیل‌نشده باقی مانده — از این تعداد ${fa(worthAnalyzingCount)} تا نمره‌ی توان مالی کافی دارند. تحلیل از ارزشمندترین شروع می‌شود.`}
         </p>
 
         {campaigns.length === 0 ? (

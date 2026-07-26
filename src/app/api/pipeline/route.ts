@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { isConfigured } from "@/lib/ai";
 import { runLeadPipeline, runLeadStep } from "@/lib/agents/orchestrator";
+import { scoreAffluence } from "@/lib/agents/affluence";
+import { AFFLUENCE_THRESHOLDS } from "@/lib/config";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -26,10 +28,13 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
 
   try {
-    // حالت تکی — **یک گام** در هر درخواست (برای دکمه‌ی «تولید پیام اختصاصی»).
+    // حالت تکی — **یک گام** در هر درخواست (برای دکمه‌های «تولید پیام» و «تحلیل لید»).
     // مثل حالت کمپین، کلاینت گام‌ها را پشت‌سرهم می‌زند تا از سقف ۶۰ ثانیه رد نشود.
+    //
+    // force: دروازه‌ی توان مالی نادیده گرفته می‌شود. کلیک انسان روی یک ردیف
+    // مشخص، اراده‌ی صریح است و بر غربال خودکار مقدم.
     if (typeof body.leadId === "string" && body.leadId && body.step === true) {
-      const step = await runLeadStep(body.leadId);
+      const step = await runLeadStep(body.leadId, { force: body.force === true });
       return Response.json({ step, done: step.done });
     }
 
@@ -52,6 +57,40 @@ export async function POST(req: NextRequest) {
       // هدف می‌گیرد که تحلیل و امتیازدهی شده‌اند و منتظر پیام‌اند — تا با
       // دکمه‌ی تحلیل گروهی تداخل نکند و سهمیه‌ی مدل صرف تحلیل نشود.
       const onlyMessage = body.only === "message";
+
+      // حالت «فقط توان مالی» — **صفر توکن**. برای همه‌ی لیدهایی که نمره ندارند
+      // (لیدهای دستی یا قدیمی) یک‌جا محاسبه می‌کند تا پیش از خرج هر توکنی
+      // بدانی کدام لیدها ارزش تحلیل دارند. یک درخواست، بدون فراخوان مدل.
+      if (body.only === "affluence") {
+        const all = await store.listLeads({ campaignId: body.campaignId, limit: 1000 });
+        const names = all.map((l) => l.businessName);
+
+        let scored = 0;
+        // نمره‌ی هر لید بعد از این حلقه: موجود یا تازه‌محاسبه‌شده
+        const finalScores: number[] = [];
+        for (const l of all) {
+          if (l.affluenceScore == null) {
+            const aff = scoreAffluence(l, { siblingNames: names });
+            await store.updateLead(l.id, {
+              affluenceScore: aff.score,
+              affluenceSignals: aff.signals,
+            });
+            finalScores.push(aff.score);
+            scored++;
+          } else {
+            finalScores.push(l.affluenceScore);
+          }
+        }
+
+        return Response.json({
+          only: "affluence",
+          scored, // چند لید تازه نمره گرفت
+          total: all.length,
+          worthAnalyzing: finalScores.filter((s) => s >= AFFLUENCE_THRESHOLDS.analyze).length,
+          threshold: AFFLUENCE_THRESHOLDS.analyze,
+          done: true,
+        });
+      }
 
       if (onlyMessage) {
         const waiting = await store.listLeads({
@@ -88,11 +127,16 @@ export async function POST(req: NextRequest) {
             status: "READY_FOR_MESSAGE",
             limit: 1,
           });
-      const fresh = await store.listLeads({
+      const freshRaw = await store.listLeads({
         campaignId: body.campaignId,
         status: "NEW",
         limit: 500,
       });
+
+      // **مهم‌ترین بخش صرفه‌جویی:** لیدها به ترتیب نزولیِ توان مالی پردازش
+      // می‌شوند، نه به ترتیب تاریخ. اگر سهمیه‌ی روزانه وسط کار تمام شود،
+      // ارزشمندترین لیدها تحلیل شده‌اند نه یک مشت لید تصادفی.
+      const fresh = [...freshRaw].sort((a, b) => (b.affluenceScore ?? 0) - (a.affluenceScore ?? 0));
 
       const target = scored[0] ?? readyForMessage[0] ?? fresh[0];
       if (!target) {
@@ -100,12 +144,15 @@ export async function POST(req: NextRequest) {
       }
 
       const step = await runLeadStep(target.id);
-      // «باقی‌مانده» = لیدهایی که هنوز تحلیل نشده‌اند (برای نمایش پیشرفت)
-      const remaining = step.ran === "analysis" ? fresh.length - 1 : fresh.length;
+      // «باقی‌مانده» = لیدهایی که هنوز تحلیل نشده‌اند (برای نمایش پیشرفت).
+      // دروازه‌ی توان مالی هم لید را از صف NEW خارج می‌کند، پس آن هم می‌شمارد.
+      const consumed = step.ran === "analysis" || step.ran === "affluence-gate";
+      const remaining = consumed ? fresh.length - 1 : fresh.length;
 
       return Response.json({
         step,
         businessName: target.businessName,
+        affluenceScore: target.affluenceScore,
         remaining,
         done: false,
       });
