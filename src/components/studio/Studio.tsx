@@ -351,19 +351,30 @@ export function Studio() {
   const actionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const confirmRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const emailTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  // عنوان کارت همیشه رندر است؛ بعد از تأیید/رد که دکمه‌ها unmount می‌شوند،
+  // فوکوس به اینجا برمی‌گردد (وگرنه فوکوس به body می‌افتد).
+  const cardHeadingRefs = useRef<Record<string, HTMLHeadingElement | null>>({});
 
   // فوکوس روی دکمه‌ی تأیید نهایی — همین جابه‌جایی خودش «اعلانِ» مسلح‌شدن است
   useEffect(() => {
     if (armed) confirmRefs.current[`${armed.id}:${armed.action}`]?.focus();
   }, [armed]);
 
-  /** لغو حالت مسلح + بازگرداندن فوکوس به دکمه‌ی آغازگر */
+  /** لغو حالت مسلح + بازگرداندن فوکوس به دکمه‌ی آغازگر (اول فوکوس، بعد hidden) */
   const disarm = useCallback(() => {
-    setArmed((cur) => {
-      if (cur) actionRefs.current[`${cur.id}:${cur.action}`]?.focus();
-      return null;
-    });
-  }, []);
+    if (armed) actionRefs.current[`${armed.id}:${armed.action}`]?.focus();
+    setArmed(null);
+  }, [armed]);
+
+  // Escape در هر جای صفحه حالت مسلح را لغو می‌کند — نه فقط وقتی فوکوس داخل کارت است
+  useEffect(() => {
+    if (!armed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") disarm();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [armed, disarm]);
 
   // فرم کمپین جدید
   const [name, setName] = useState("");
@@ -603,10 +614,13 @@ export function Studio() {
     const text = (drafts[m.id] ?? currentText(m)).trim();
     if (!text) {
       setCardError((p) => ({ ...p, [m.id]: "متن پیام نمی‌تواند خالی باشد." }));
+      setTaskStatus(`خطا در پیام «${m.businessName}»: متن پیام نمی‌تواند خالی باشد.`);
+      document.getElementById(`msg-text-${m.id}`)?.focus();
       return;
     }
     setMsgBusyId(m.id);
     setCardError((p) => ({ ...p, [m.id]: "" }));
+    setTaskStatus(`در حال ذخیره‌ی متن پیام «${m.businessName}»…`);
     try {
       await api("/api/messages", {
         method: "PATCH",
@@ -623,7 +637,9 @@ export function Studio() {
         `متن پیام «${m.businessName}» ذخیره و دوباره توسط نگهبان سیاست بررسی شد. نتیجه‌ی جدید در همین کارت آمده است.`
       );
     } catch (e) {
-      setCardError((p) => ({ ...p, [m.id]: e instanceof Error ? e.message : String(e) }));
+      const msg = e instanceof Error ? e.message : String(e);
+      setCardError((p) => ({ ...p, [m.id]: msg }));
+      setTaskStatus(`خطا در ذخیره‌ی پیام «${m.businessName}»: ${msg}`);
     } finally {
       setMsgBusyId(null);
     }
@@ -634,6 +650,13 @@ export function Studio() {
     const key = `${m.id}:${action}`;
     setMsgBusyId(m.id);
     setCardError((p) => ({ ...p, [m.id]: "" }));
+    setTaskStatus(
+      action === "approve"
+        ? `در حال تأیید پیام «${m.businessName}»…`
+        : action === "reject"
+          ? `در حال رد پیام «${m.businessName}»…`
+          : `در حال ثبت ارسال پیام «${m.businessName}»…`
+    );
     try {
       await api("/api/messages", {
         method: "PATCH",
@@ -652,11 +675,19 @@ export function Studio() {
             : `ارسال پیام «${m.businessName}» ثبت شد.`
       );
     } catch (e) {
-      setCardError((p) => ({ ...p, [m.id]: e instanceof Error ? e.message : String(e) }));
+      const msg = e instanceof Error ? e.message : String(e);
+      setCardError((p) => ({ ...p, [m.id]: msg }));
+      setTaskStatus(`خطا در پیام «${m.businessName}»: ${msg}`);
       setArmed(null);
     } finally {
       setMsgBusyId(null);
-      actionRefs.current[key]?.focus(); // فوکوس به دکمه‌ی آغازگر برمی‌گردد
+      // بعد از موفقیت، دکمه‌ی آغازگر unmount می‌شود (وضعیت پیام عوض شده)؛
+      // پس فوکوس به عنوان کارت می‌رود که همیشه هست و وضعیت جدید را دارد.
+      requestAnimationFrame(() => {
+        const h = cardHeadingRefs.current[m.id];
+        if (h) h.focus();
+        else actionRefs.current[key]?.focus();
+      });
     }
   }
 
@@ -1183,20 +1214,31 @@ export function Studio() {
             <legend className="px-1 text-sm font-medium text-ink">نمایش کدام پیام‌ها</legend>
             <div className="flex flex-wrap gap-4">
               {MSG_FILTERS.map((f) => (
-                <span key={f.id} className="flex items-center gap-2">
+                <label
+                  key={f.id}
+                  htmlFor={`msg-filter-${f.id}`}
+                  className="flex min-h-[24px] cursor-pointer items-center gap-2 py-1 text-sm text-ink"
+                >
                   <input
                     type="radio"
                     id={`msg-filter-${f.id}`}
                     name="msg-filter"
                     value={f.id}
                     checked={msgFilter === f.id}
-                    onChange={() => setMsgFilter(f.id)}
-                    className="h-4 w-4 accent-brand-600"
+                    onChange={() => {
+                      setMsgFilter(f.id);
+                      // تغییر فیلتر، فهرست را عوض می‌کند؛ بدون اعلام، کاربر
+                      // screen reader نمی‌فهمد چند پیام ماند (WCAG 4.1.3)
+                      const n =
+                        f.id === "all"
+                          ? messages.length
+                          : messages.filter((x) => x.status === f.id).length;
+                      setTaskStatus(`فیلتر «${f.label}» اعمال شد. ${fa(n)} پیام نمایش داده می‌شود.`);
+                    }}
+                    className="h-6 w-6 accent-brand-600"
                   />
-                  <label htmlFor={`msg-filter-${f.id}`} className="text-sm text-ink">
-                    {f.label}
-                  </label>
-                </span>
+                  {f.label}
+                </label>
               ))}
             </div>
           </fieldset>
@@ -1224,18 +1266,23 @@ export function Studio() {
                   <article
                     aria-labelledby={`msg-h-${m.id}`}
                     className="rounded-xl border border-surface-line bg-surface p-5 shadow-card"
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape" && armed?.id === m.id) {
-                        e.stopPropagation();
-                        disarm();
-                      }
-                    }}
                   >
-                    {/* عنوان کارت: هرچه برای تصمیم لازم است در خود متن عنوان */}
-                    <h3 id={`msg-h-${m.id}`} className="text-base font-extrabold leading-7 text-ink">
-                      {m.businessName} — کانال: {m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "نامشخص"} —
-                      وضعیت: {MSG_STATUS_LABELS[m.status]} — {VERDICT_LABELS[m.policy.verdict]}
+                    {/* عنوان = هویت + وضعیت؛ جزئیات متغیر در توضیح جدا (m1) */}
+                    <h3
+                      id={`msg-h-${m.id}`}
+                      tabIndex={-1}
+                      ref={(el) => {
+                        cardHeadingRefs.current[m.id] = el;
+                      }}
+                      aria-describedby={`msg-state-${m.id}`}
+                      className="text-base font-extrabold leading-7 text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass"
+                    >
+                      {m.businessName} — {MSG_STATUS_LABELS[m.status]}
                     </h3>
+                    <p id={`msg-state-${m.id}`} className="mt-1 text-xs text-ink-muted">
+                      کانال: {m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "نامشخص"} ·{" "}
+                      {VERDICT_LABELS[m.policy.verdict]}
+                    </p>
 
                     <p className="mt-1 text-xs text-ink-muted">
                       نمره‌ی منتقد:{" "}
@@ -1253,7 +1300,7 @@ export function Studio() {
                     <h4 id={`pol-h-${m.id}`} className="mt-4 text-sm font-extrabold text-ink">
                       نگهبان سیاست — {fa(passed)} از {fa(m.policy.checks.length)} بررسی قبول شد
                     </h4>
-                    <dl aria-labelledby={`pol-h-${m.id}`} className="mt-2 space-y-1">
+                    <dl role="group" aria-labelledby={`pol-h-${m.id}`} className="mt-2 space-y-1">
                       {m.policy.checks.map((c) => (
                         <div key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
                           <dt className="font-medium text-ink">
@@ -1277,10 +1324,12 @@ export function Studio() {
                       <textarea
                         id={`msg-text-${m.id}`}
                         value={text}
-                        aria-describedby={`msg-meta-${m.id}`}
+                        aria-invalid={cardError[m.id] ? true : undefined}
+                        aria-describedby={`msg-meta-${m.id} msg-err-${m.id}`}
                         onChange={(e) => setDrafts((p) => ({ ...p, [m.id]: e.target.value }))}
                         rows={7}
-                        className="mt-2 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm leading-7 text-ink"
+                        /* border-brand-400 برای کنتراست ۳:۱ مرز فیلد (WCAG 1.4.11) */
+                        className="mt-2 w-full rounded-lg border border-brand-400 bg-white px-3 py-2 text-sm leading-7 text-ink"
                       />
                       {/* وضعیت ماندگار (نه live region) — با aria-describedby خوانده می‌شود */}
                       <p id={`msg-meta-${m.id}`} className="mt-1 text-xs text-ink-muted">
@@ -1311,7 +1360,7 @@ export function Studio() {
                               setOpenEmailId(m.id);
                             }
                           }}
-                          className="rounded-lg border border-surface-line bg-surface-dim px-3 py-2 text-sm font-medium text-ink hover:bg-surface"
+                          className="rounded-lg border border-brand-400 bg-surface-dim px-3 py-2 text-sm font-medium text-ink hover:bg-surface"
                         >
                           نسخه‌ی ایمیلی {m.businessName}
                         </button>
@@ -1355,19 +1404,27 @@ export function Studio() {
                       </div>
                     )}
 
-                    {cardError[m.id] && (
-                      <p
-                        role="alert"
-                        className="mt-4 rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger"
-                      >
-                        {cardError[m.id]}
-                      </p>
-                    )}
+                    {/*
+                      خطای کارت همیشه رندر می‌شود تا هدفِ پایدارِ aria-describedby
+                      باشد. اعلانِ صوتی از کانال مشترک setTaskStatus می‌آید، نه از
+                      یک live region جدا (پیام تکراری هم دوباره اعلام می‌شود).
+                    */}
+                    <p
+                      id={`msg-err-${m.id}`}
+                      className={
+                        cardError[m.id]
+                          ? "mt-4 rounded-lg border border-danger/70 bg-danger-soft px-3 py-2 text-sm text-danger"
+                          : "sr-only"
+                      }
+                    >
+                      {cardError[m.id]}
+                    </p>
 
                     {/* عملیات */}
                     <div
                       role="group"
                       aria-label={`عملیات پیام ${m.businessName}`}
+                      aria-describedby={m.status === "draft" ? `msg-hint-${m.id}` : undefined}
                       className="mt-4 flex flex-wrap gap-3"
                     >
                       <button
@@ -1377,7 +1434,11 @@ export function Studio() {
                           void saveEdit(m);
                         }}
                         aria-disabled={busyHere || !dirty}
-                        aria-label={`ذخیره‌ی متن پیام ${m.businessName}`}
+                        aria-label={
+                          busyHere
+                            ? `در حال ذخیره‌ی متن پیام ${m.businessName}`
+                            : `ذخیره‌ی متن پیام ${m.businessName}`
+                        }
                         className={
                           busyHere || !dirty
                             ? "rounded-lg bg-surface-dim px-4 py-2 text-sm font-bold text-ink-muted"
@@ -1425,7 +1486,7 @@ export function Studio() {
                             aria-expanded={isArmed("reject")}
                             aria-controls={`confirm-reject-${m.id}`}
                             aria-label={`رد پیام ${m.businessName}`}
-                            className="rounded-lg border border-danger/40 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
+                            className="rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
                           >
                             رد پیام
                           </button>
@@ -1443,7 +1504,7 @@ export function Studio() {
                             void runAction(m, "sent");
                           }}
                           aria-disabled={busyHere}
-                          aria-label={`ثبت ارسال پیام ${m.businessName}`}
+                          aria-label={`ثبت ارسال (خودم فرستادم) — پیام ${m.businessName}`}
                           className="rounded-lg bg-pine px-4 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
                         >
                           ثبت ارسال (خودم فرستادم)
@@ -1453,7 +1514,7 @@ export function Studio() {
                     </div>
 
                     {m.status === "draft" && (
-                      <p className="mt-2 text-xs text-ink-muted">
+                      <p id={`msg-hint-${m.id}`} className="mt-2 text-xs text-ink-muted">
                         دکمه‌ی «ثبت ارسال» بعد از تأیید همین پیام در این کارت ظاهر می‌شود.
                       </p>
                     )}
@@ -1486,7 +1547,7 @@ export function Studio() {
                         <button
                           type="button"
                           onClick={disarm}
-                          className="rounded-lg border border-surface-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
+                          className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
                         >
                           انصراف
                         </button>
@@ -1519,7 +1580,7 @@ export function Studio() {
                         <button
                           type="button"
                           onClick={disarm}
-                          className="rounded-lg border border-surface-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
+                          className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-surface-dim"
                         >
                           انصراف
                         </button>
