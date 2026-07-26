@@ -142,22 +142,59 @@ const OPENS_NEW_TAB: Record<ChannelKey, boolean> = {
   phone: false,
 };
 
+/** فعلِ هر کانال — لینک باید بگوید با کلیک چه اتفاقی می‌افتد */
+const CHANNEL_VERBS: Record<ChannelKey, string> = {
+  instagram: "باز کردن پیج",
+  whatsapp: "شروع گفت‌وگو",
+  telegram: "شروع گفت‌وگو",
+  email: "نوشتن ایمیل",
+  siteForm: "باز کردن فرم",
+  phone: "تماس",
+};
+
+/** ارقام را جدا می‌کند تا رقم‌به‌رقم خوانده شوند، نه یک عدد ۱۱ رقمی */
+const spacedDigits = (v: string) => digitsOnly(v).split("").join(" ");
+
+/**
+ * ایزوله‌ی دوجهته (FSI…PDI).
+ * نام دسترس‌پذیر یک رشته‌ی تخت است، پس <bdi> آنجا کار نمی‌کند؛ این کاراکترهای
+ * کنترلی همان کار را داخل attribute انجام می‌دهند.
+ */
+const isolate = (v: string) => `⁨${v}⁩`;
+
 /**
  * کانال‌های ارتباط به‌صورت **لینک قابل‌کلیک**.
  * @param businessName در نام دسترس‌پذیر هر لینک می‌آید تا خارج از زمینه هم روشن باشد
+ * @param labelledBy شناسه‌ی سرتیتری که این فهرست را نام‌گذاری می‌کند
  */
-function Channels({ channels, businessName }: { channels: ContactChannels; businessName?: string }) {
+function Channels({
+  channels,
+  businessName,
+  labelledBy,
+}: {
+  channels: ContactChannels;
+  businessName?: string;
+  labelledBy?: string;
+}) {
   const keys = (Object.keys(CHANNEL_LABELS) as ChannelKey[]).filter((k) => channels[k]);
-  if (keys.length === 0) return <span className="text-ink-muted">—</span>;
+  if (keys.length === 0)
+    return (
+      <p className="text-ink-muted">
+        <span aria-hidden="true">—</span>
+        <span className="sr-only">راه ارتباطی ثبت نشده است</span>
+      </p>
+    );
   return (
-    <ul className="flex flex-wrap gap-1">
+    <ul aria-labelledby={labelledBy} className="flex flex-wrap gap-1">
       {keys.map((k) => {
         const value = String(channels[k]);
         const href = channelHref(k, value);
         const newTab = OPENS_NEW_TAB[k];
-        const label = `${CHANNEL_LABELS[k]}${businessName ? ` ${businessName}` : ""}: ${value}${
-          newTab ? " (در تب جدید باز می‌شود)" : ""
-        }`;
+        // شماره رقم‌به‌رقم، بقیه ایزوله‌شده. برچسب اول می‌آید تا Label in Name حفظ شود.
+        const spoken = k === "phone" || k === "whatsapp" ? spacedDigits(value) : isolate(value);
+        const label =
+          `${CHANNEL_LABELS[k]}${businessName ? ` ${businessName}` : ""}: ${spoken} — ` +
+          `${CHANNEL_VERBS[k]}${newTab ? "، در تب جدید باز می‌شود" : ""}`;
         return (
           <li key={k}>
             {href ? (
@@ -249,10 +286,15 @@ async function copyText(text: string): Promise<boolean> {
   } catch {
     /* می‌افتیم روی مسیر پشتیبان */
   }
+  // مسیر پشتیبان فوکوس را می‌دزدد (select روی textarea موقت)، پس بعدش
+  // فوکوس را به همان جایی برمی‌گردانیم که بود — وگرنه Tab از اول صفحه شروع می‌شود.
+  const prev = document.activeElement as HTMLElement | null;
   try {
     const ta = document.createElement("textarea");
     ta.value = text;
     ta.setAttribute("readonly", "");
+    ta.setAttribute("aria-hidden", "true");
+    ta.tabIndex = -1;
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
@@ -262,6 +304,8 @@ async function copyText(text: string): Promise<boolean> {
     return ok;
   } catch {
     return false;
+  } finally {
+    prev?.focus?.();
   }
 }
 
@@ -400,7 +444,7 @@ function LeadPanel({
       )}
 
       {/* توان مالی — تخمین از نشانه‌های عمومی، نه درآمد واقعی */}
-      {lead.affluenceScore != null && (
+      {lead.affluenceScore != null && lead.affluenceSignals.length > 0 && (
         <section>
           <h4 id={`aff-h-${lead.id}`} className="text-sm font-extrabold text-ink">
             نشانه‌های توان مالی — <bdi>{fa(lead.affluenceScore)}</bdi> از ۱۰۰
@@ -412,7 +456,10 @@ function LeadPanel({
           </p>
           <ul aria-labelledby={`aff-h-${lead.id}`} className="mt-2 space-y-1 text-sm text-ink-muted">
             {lead.affluenceSignals.map((s, i) => (
-              <li key={i}>• {s}</li>
+              <li key={i}>
+                <span aria-hidden="true">• </span>
+                {s}
+              </li>
             ))}
           </ul>
         </section>
@@ -421,7 +468,7 @@ function LeadPanel({
       {/* یافته‌ی دستی اینستاگرام */}
       <section>
         <h4 className="text-sm font-extrabold text-ink">بررسی دستی پیج اینستاگرام</h4>
-        <p className="mt-1 text-xs leading-6 text-ink-muted">
+        <p id={`ig-hint-${lead.id}`} className="mt-1 text-xs leading-6 text-ink-muted">
           {detail.instagramAuto === false
             ? "تحلیل خودکار پیج خاموش است (کلید IG_ACCESS_TOKEN روی سرور تنظیم نشده). هرچه اینجا بنویسی مثل «مشاهده‌ی قطعی» وارد تحلیل و پیام بعدی می‌شود."
             : "هرچه اینجا بنویسی، علاوه بر داده‌ی خودکار، مثل «مشاهده‌ی قطعی» وارد تحلیل و پیام بعدی می‌شود."}
@@ -432,6 +479,7 @@ function LeadPanel({
         <textarea
           id={`ig-note-${lead.id}`}
           value={igDraft}
+          aria-describedby={`ig-hint-${lead.id}`}
           onChange={(e) => onIgDraftChange(e.target.value)}
           rows={3}
           placeholder="مثال: ۱۲ هزار فالوئر، آخرین پست ۳ ماه پیش، بایو بدون لینک، بیشتر پست‌ها عکس ساده از محصول"
@@ -718,7 +766,7 @@ export function Studio() {
     setNotice("");
     setTaskStatus(
       "تحلیل گروهی شروع شد. لیدها یکی‌یکی و پشت‌سرهم تحلیل می‌شوند تا همه تمام شوند. " +
-        "دکمه‌های «تحلیل لید» در جدول تا پایان کار غیرفعال هستند."
+        "دکمه‌های «تحلیل لید» و «تولید پیام» در جدول تا پایان کار غیرفعال هستند."
     );
 
     let analyzed = 0; // تعداد لیدهایی که تحلیلشان کامل شد
@@ -1102,6 +1150,9 @@ export function Studio() {
       <span id="batch-block-note" className="sr-only">
         {batchRunning ? "تحلیل گروهی در حال اجراست؛ تا پایان آن این دکمه غیرفعال است." : ""}
       </span>
+      <span id="busy-block-note" className="sr-only">
+        {busyAny ? "یک کار مدل‌محور در حال اجراست؛ تا پایان آن این دکمه غیرفعال است." : ""}
+      </span>
       <span id="policy-block-note" className="sr-only">
         نگهبان سیاست این پیام را مسدود کرده است؛ سرور تأیید آن را نمی‌پذیرد. ابتدا متن را ویرایش و
         ذخیره کنید تا دوباره بررسی شود.
@@ -1420,7 +1471,15 @@ export function Studio() {
             className="overflow-x-auto rounded-xl border border-surface-line shadow-card"
           >
             <table className="w-full min-w-[860px] border-collapse text-start text-sm">
-              <caption className="sr-only">فهرست لیدهای کشف‌شده‌ی کمپین</caption>
+              {/*
+                توضیح ستون «توان مالی» عمداً اینجاست نه در <th>: محتوای th جزو
+                نام دسترس‌پذیر ستون است و پیش از **هر سلول** دوباره خوانده می‌شود.
+                caption یک‌بار هنگام ورود به جدول خوانده می‌شود.
+              */}
+              <caption className="sr-only">
+                فهرست لیدهای کشف‌شده‌ی کمپین. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه
+                درآمد واقعی.
+              </caption>
               <thead className="bg-surface-dim text-xs text-ink-muted">
                 <tr>
                   <th scope="col" className="px-4 py-3 font-semibold">کسب‌وکار</th>
@@ -1429,10 +1488,7 @@ export function Studio() {
                   <th scope="col" className="px-4 py-3 font-semibold">تلفن</th>
                   <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
                   <th scope="col" className="px-4 py-3 font-semibold">امتیاز</th>
-                  <th scope="col" className="px-4 py-3 font-semibold">
-                    توان مالی
-                    <span className="sr-only"> — تخمین از نشانه‌های عمومی، نه درآمد واقعی</span>
-                  </th>
+                  <th scope="col" className="px-4 py-3 font-semibold">توان مالی</th>
                   <th scope="col" className="px-4 py-3 font-semibold">وضعیت</th>
                   <th scope="col" className="px-4 py-3 font-semibold">عملیات</th>
                 </tr>
@@ -1476,7 +1532,17 @@ export function Studio() {
                         {l.score != null ? <bdi>{fa(l.score)}</bdi> : "—"}
                       </td>
                       <td className="px-4 py-3 text-ink-muted">
-                        {l.affluenceScore != null ? <bdi>{fa(l.affluenceScore)}</bdi> : "—"}
+                        {l.affluenceScore != null ? (
+                          <>
+                            <bdi>{fa(l.affluenceScore)}</bdi>
+                            <span className="sr-only"> از ۱۰۰</span>
+                          </>
+                        ) : (
+                          <>
+                            <span aria-hidden="true">—</span>
+                            <span className="sr-only">محاسبه نشده</span>
+                          </>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span className="rounded-full bg-surface-dim px-2 py-0.5 text-xs font-medium text-ink">
@@ -1484,19 +1550,23 @@ export function Studio() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <div role="group" aria-label={`عملیات لید ${l.businessName}`} className="flex flex-wrap gap-2">
+                        {/*
+                          group بدون نام: نام هر دکمه خودش شامل نام کسب‌وکار است،
+                          پس نام‌گذاری گروه باعث می‌شد نام سه بار پشت‌سرهم خوانده شود.
+                        */}
+                        <div role="group" className="flex flex-wrap gap-2">
                           <button
                             type="button"
                             aria-label={`تحلیل لید ${l.businessName}`}
                             aria-disabled={busyAny}
-                            aria-describedby={batchRunning ? "batch-block-note" : undefined}
+                            aria-describedby={busyAny ? "busy-block-note" : undefined}
                             onClick={() => {
                               if (busyAny) return;
                               void analyze(l);
                             }}
                             className={
                               busyAny
-                                ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
+                                ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
                                 : "rounded-lg bg-brand-600 px-3 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700"
                             }
                           >
@@ -1508,14 +1578,16 @@ export function Studio() {
                             type="button"
                             aria-label={`تولید پیام اختصاصی برای ${l.businessName}`}
                             aria-disabled={busyAny || !canMessage(l)}
-                            aria-describedby={!canMessage(l) ? "msg-gate-note" : undefined}
+                            aria-describedby={
+                              !canMessage(l) ? "msg-gate-note" : busyAny ? "busy-block-note" : undefined
+                            }
                             onClick={() => {
                               if (busyAny || !canMessage(l)) return;
                               void generateMessageFor(l);
                             }}
                             className={
                               busyAny || !canMessage(l)
-                                ? "rounded-lg bg-surface-dim px-3 py-2 text-sm font-bold text-ink-muted"
+                                ? "rounded-lg border border-ink-muted bg-surface px-3 py-2 text-sm font-bold text-ink-muted"
                                 : "rounded-lg bg-pine px-3 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
                             }
                           >
@@ -1559,14 +1631,21 @@ export function Studio() {
               void generateAllMessages();
             }}
             aria-disabled={busyAny || !canGenerateAll}
-            aria-describedby={!canGenerateAll ? "msg-all-gate-note" : "msg-all-count"}
+            /* شمارنده همیشه بماند: دلیل دقیقِ غیرفعال‌بودن آنجاست، نه در قاعده‌ی کلی */
+            aria-describedby={canGenerateAll ? "msg-all-count" : "msg-all-count msg-all-gate-note"}
             className={
               busyAny || !canGenerateAll
-                ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
+                ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
                 : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
             }
           >
-            {msgGenRunning ? "در حال تولید پیام‌ها…" : "تولید پیام برای همه‌ی لیدهای کمپین ✍️"}
+            {msgGenRunning ? (
+              "در حال تولید پیام‌ها…"
+            ) : (
+              <>
+                تولید پیام برای همه‌ی لیدهای کمپین <span aria-hidden="true">✍️</span>
+              </>
+            )}
           </button>
         </div>
 
@@ -1733,7 +1812,11 @@ export function Studio() {
                         راه‌های ارتباط {m.businessName}
                       </h4>
                       <div className="mt-1">
-                        <Channels channels={m.contactChannels} businessName={m.businessName} />
+                        <Channels
+                          channels={m.contactChannels}
+                          businessName={m.businessName}
+                          labelledBy={`ch-h-${m.id}`}
+                        />
                       </div>
                     </div>
 
@@ -1875,7 +1958,7 @@ export function Studio() {
                               )
                             );
                           }}
-                          aria-label={`کپی موضوع و متن ایمیل ${m.businessName}`}
+                          aria-label={`کپی ایمیل ${m.businessName} — موضوع و متن`}
                           className="rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 transition-colors hover:bg-brand-50"
                         >
                           کپی ایمیل

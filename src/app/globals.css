@@ -13,9 +13,14 @@ h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-estedad), var(--font-vazirmatn), sans-serif;
 }
 
-/* فوکوس قابل‌مشاهده برای ناوبری با کیبورد — تأکید برنجی برند */
+/*
+  فوکوس قابل‌مشاهده برای ناوبری با کیبورد — تأکید برنجی برند.
+  brass-dark به‌جای brass استفاده می‌شود: brass روی پس‌زمینه‌ی صفحه (surface-dim)
+  نسبت ۲.۹۸ می‌داد و از حد ۳:۱ رد نمی‌شد. brass-dark هم روی صفحه (۴.۰۵) و هم
+  روی کارت سفید (۴.۴۸) قبول است.
+*/
 :focus-visible {
-  outline: 2px solid theme("colors.brass.DEFAULT");
+  outline: 2px solid theme("colors.brass.dark");
   outline-offset: 2px;
   border-radius: 6px;
 }
