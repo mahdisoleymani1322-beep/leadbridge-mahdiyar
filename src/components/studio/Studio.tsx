@@ -560,11 +560,18 @@ export function Studio() {
           await loadLeads(selectedId).catch(() => {});
         }
 
-        // پیام پیش‌نویس شد (فاز ۴) — لید واجد شرایط بوده و متن آماده است
+        // زیرگام‌های تولید پیام (فاز ۴) — هر کدام یک فراخوان مدل، تا از سقف
+        // ۶۰ ثانیه‌ای تابع رد نشود. فقط «message» یعنی کار آن لید تمام شد.
+        if (res.step.ran === "message-draft") {
+          setTaskStatus(`برای «${res.businessName ?? "لید"}» پیش‌نویس پیام نوشته شد؛ حالا منتقد نمره می‌دهد…`);
+        }
+        if (res.step.ran === "message-revise") {
+          setTaskStatus(`پیام «${res.businessName ?? "لید"}» طبق ایرادهای منتقد بازنویسی شد؛ نقد دوباره…`);
+        }
         if (res.step.ran === "message") {
           drafted++;
           setTaskStatus(
-            `برای «${res.businessName ?? "لید"}» پیش‌نویس پیام ساخته شد و در بخش پیام‌ها منتظر تأیید توست. در حال ادامه…`
+            `پیام «${res.businessName ?? "لید"}» آماده شد و در بخش پیام‌ها منتظر تأیید توست. در حال ادامه…`
           );
           await loadMessages(selectedId).catch(() => {});
         }
