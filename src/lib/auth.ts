@@ -11,9 +11,17 @@ import type { NextRequest } from "next/server";
  */
 
 export function isStudioAuthorized(req: NextRequest): boolean {
-  const password = process.env.STUDIO_PASSWORD;
+  /*
+    trim روی هر دو طرف عمدی است.
+
+    مقدار متغیر محیطی خیلی راحت یک `\n` یا `\r\n` انتها می‌گیرد — بسته به
+    اینکه با چه ابزاری ست شده باشد. همین یک کاراکترِ نامرئی باعث شد اولین
+    بار که رمز ست شد، درخواستِ **با رمز درست** هم ۴۰۱ بگیرد و تشخیصش از
+    «رمز غلط» ممکن نباشد. هدر HTTP هم ممکن است فاصله‌ی اضافی داشته باشد.
+  */
+  const password = process.env.STUDIO_PASSWORD?.trim();
   if (!password) return true;
-  return req.headers.get("x-studio-password") === password;
+  return req.headers.get("x-studio-password")?.trim() === password;
 }
 
 export function unauthorized(): Response {
