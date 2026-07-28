@@ -44,6 +44,14 @@ export type DiscoverySummary = {
   webSearches: number;
   /** چند لید از جست‌وجوی وب آمد (بقیه از OSM/Google) */
   webLeads: number;
+  /**
+   * توضیح خوانا وقتی نتیجه کمتر از انتظار است.
+   *
+   * چرا لازم شد: در تست زنده، کشف با `found: 0` و `errors: 0` و پاسخ ۲۰۰
+   * برگشت. از دید مالک «دکمه را زدم و هیچ اتفاقی نیفتاد» — بدون هیچ سرنخی که
+   * مشکل از شهر است، از تگ‌های بازار، یا از در دسترس نبودن سرویس.
+   */
+  notes: string[];
   leadIds: string[];
 };
 
@@ -85,56 +93,91 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     errors: 0,
     webSearches: 0,
     webLeads: 0,
+    notes: [],
     leadIds: [],
   };
 
-  // ۱) جمع‌آوری کسب‌وکارها از منبع
-  let discovered: DiscoveredPlace[] = [];
-  if (useGoogle) {
-    const terms = queryTermsFor(campaign.market);
+  /*
+    ۱) جمع‌آوری از منابع — **موازی، نه پشت‌سرهم**.
+
+    قبلاً منبع نقشه اول کامل می‌شد و بعد نوبت جست‌وجوی وب می‌رسید. با اضافه‌شدن
+    بودجه‌ی زمانی، این ترتیب یک عارضه‌ی واقعی ساخت که در تست زنده دیده شد: وقتی
+    Overpass کند بود (~۳۵ ثانیه)، مهلت باقی‌مانده زیر آستانه می‌افتاد و
+    **Tavily اصلاً اجرا نمی‌شد** (`webSearches: 0`). یعنی گاردی که برای
+    جلوگیری از تایم‌اوت گذاشته شده بود، منبع دوم را قربانی می‌کرد.
+
+    دو منبع کاملاً مستقل و هر دو I/O شبکه‌اند؛ اجرای موازی هم زمان کل را
+    تقریباً نصف می‌کند و هم گرسنگی را حذف می‌کند.
+
+    allSettled: شکست یک منبع نباید منبع دیگر را از بین ببرد.
+  */
+  const mapSource = async (): Promise<DiscoveredPlace[]> => {
+    if (!useGoogle) {
+      return discoverViaOsm(osmTagsFor(campaign.market), campaign.city, limit);
+    }
+    const out: DiscoveredPlace[] = [];
     const seen = new Set<string>();
-    for (const term of terms) {
-      if (discovered.length >= limit) break;
+    for (const term of queryTermsFor(campaign.market)) {
+      if (out.length >= limit) break;
+      if (timeLeft() < 12_000) break;
       try {
         const { places } = await textSearch(term, campaign.city, {
-          max: Math.min(20, limit - discovered.length),
+          max: Math.min(20, limit - out.length),
         });
         for (const p of places) {
           if (p.placeId && !seen.has(p.placeId)) {
             seen.add(p.placeId);
-            discovered.push(p);
+            out.push(p);
           }
         }
       } catch {
         summary.errors++;
       }
     }
-  } else {
-    discovered = await discoverViaOsm(osmTagsFor(campaign.market), campaign.city, limit);
-  }
+    return out;
+  };
 
-  // منبع مکمل — جست‌وجوی وب، **در همان دکمه‌ی کشف** (نه دکمه‌ی جدا).
-  // فقط اگر TAVILY_API_KEY تنظیم شده باشد؛ نتایج با OSM ترکیب می‌شوند.
-  // جست‌وجوی وب فقط اگر هنوز وقت معناداری مانده باشد (وگرنه از استخراج
-  // کانال‌های لیدهایی که همین حالا داریم می‌زند، که ارزشمندتر است)
-  if (isWebSearchConfigured() && timeLeft() > 12_000) {
-    const web = await discoverViaWebSearch(
+  const webSource = async () => {
+    if (!isWebSearchConfigured()) return { places: [] as DiscoveredPlace[], searchesUsed: 0 };
+    return discoverViaWebSearch(
       queryTermsFor(campaign.market),
       campaign.city,
       Math.min(limit, WEB_SEARCH.maxLeadsPerRun),
-      // ۱۰ ثانیه برای استخراج کانال‌ها و درج کنار می‌گذاریم
-      deadlineAt - 10_000
+      // ۱۲ ثانیه برای استخراج کانال‌ها و درج در دیتابیس کنار گذاشته می‌شود
+      deadlineAt - 12_000
     );
-    summary.webSearches = web.searchesUsed;
-    const seenIds = new Set(discovered.map((p) => p.placeId));
-    for (const wp of web.places) {
-      if (!seenIds.has(wp.placeId)) {
-        seenIds.add(wp.placeId);
-        discovered.push(wp);
-        summary.webLeads++;
-      }
-    }
+  };
+
+  const [mapRes, webRes] = await Promise.allSettled([mapSource(), webSource()]);
+
+  const discovered: DiscoveredPlace[] = [];
+  const seenIds = new Set<string>();
+  const pushUnique = (p: DiscoveredPlace, fromWeb: boolean) => {
+    if (seenIds.has(p.placeId)) return;
+    seenIds.add(p.placeId);
+    discovered.push(p);
+    if (fromWeb) summary.webLeads++;
+  };
+
+  if (mapRes.status === "fulfilled") {
+    for (const p of mapRes.value) pushUnique(p, false);
+  } else {
+    summary.errors++;
+    summary.notes.push(
+      `منبع نقشه ناموفق بود: ${
+        mapRes.reason instanceof Error ? mapRes.reason.message : String(mapRes.reason)
+      }`
+    );
   }
+
+  if (webRes.status === "fulfilled") {
+    summary.webSearches = webRes.value.searchesUsed;
+    for (const p of webRes.value.places) pushUnique(p, true);
+  } else {
+    summary.errors++;
+    summary.notes.push("جست‌وجوی وب ناموفق بود.");
+  }
+
   summary.found = discovered.length;
 
   // ۱-ب) پیش‌مرتب‌سازی بر اساس نشانه‌های توان مالیِ در دسترسِ همین لحظه.
@@ -269,6 +312,32 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     await store.createLead(lead);
     summary.inserted++;
     summary.leadIds.push(lead.id);
+  }
+
+  /*
+    ۳-ب) تشخیص «چرا چیزی پیدا نشد».
+
+    بدون این، خروجی `found: 0, errors: 0` بود و مالک فقط می‌دید دکمه را زده و
+    هیچ اتفاقی نیفتاده. علت‌های واقعی کاملاً متفاوت‌اند و راه‌حلشان هم فرق دارد.
+  */
+  if (summary.found === 0) {
+    summary.notes.push(
+      `هیچ کسب‌وکاری پیدا نشد. محتمل‌ترین علت‌ها: نام شهر «${campaign.city}» روی نقشه شناخته نشد، ` +
+        `یا برای بازار «${marketLabel(campaign.market)}» در این شهر داده‌ی ثبت‌شده‌ای نیست.`
+    );
+    if (!isWebSearchConfigured()) {
+      summary.notes.push("TAVILY_API_KEY تنظیم نشده، پس منبع جست‌وجوی وب هم در دسترس نبود.");
+    }
+  } else if (summary.inserted === 0) {
+    summary.notes.push(
+      `${summary.found} کسب‌وکار پیدا شد ولی هیچ‌کدام تازه نبودند ` +
+        `(${summary.duplicates} تکراری، ${summary.invalid} بدون راه تماس معتبر).`
+    );
+  }
+  if (Date.now() >= deadlineAt) {
+    summary.notes.push(
+      "بودجه‌ی زمانی کشف تمام شد؛ نتیجه ناقص است. دوباره «کشف لید» را بزن تا ادامه پیدا کند."
+    );
   }
 
   // ۴) ثبت اجرای کشف (قابل‌دیباگ؛ صفر توکن)

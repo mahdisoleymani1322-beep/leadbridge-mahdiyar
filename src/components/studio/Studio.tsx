@@ -1089,11 +1089,14 @@ export function Studio() {
           invalid: number;
           webSearches: number;
           webLeads: number;
+          notes?: string[];
         };
       }>("/api/discovery", { method: "POST", body: JSON.stringify({ campaignId: selectedId }) });
+      // notes توضیح می‌دهد چرا نتیجه کم بود — بدون آن، «۰ لید» بی‌سرنخ می‌ماند
+      const notes = summary.notes?.length ? ` ${summary.notes.join(" ")}` : "";
       setNotice(
         `کشف انجام شد: ${fa(summary.found)} یافت، ${fa(summary.inserted)} جدید، ${fa(summary.duplicates)} تکراری، ${fa(summary.invalid)} نامعتبر — ` +
-          `${fa(summary.webSearches)} جست‌وجوی وب مصرف شد و ${fa(summary.webLeads)} لید از آن آمد.`
+          `${fa(summary.webSearches)} جست‌وجوی وب مصرف شد و ${fa(summary.webLeads)} لید از آن آمد.${notes}`
       );
       await loadLeads(selectedId);
     } catch (e) {
