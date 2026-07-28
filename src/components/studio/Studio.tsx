@@ -76,6 +76,105 @@ const CRITERION_LABELS: Record<ScoringCriterion, string> = {
 // نبود — یعنی تنظیم‌کردن STUDIO_PASSWORD عملاً مالک را از داشبورد بیرون می‌کرد.
 const api = apiFetch;
 
+/**
+ * بازخورد کیفیت پیام — منبع دوم خودبهبودی.
+ *
+ * بازخورد منفیِ **همراه توضیح** به `lessons` نوشته می‌شود و از اجرای بعدی به
+ * پرامپت نویسنده تزریق می‌گردد. بازخورد مثبت فقط ثبت می‌شود: «خوب بود» چیزی
+ * برای اصلاح نمی‌گوید و تزریقش به پرامپت فقط توکن خرج می‌کند.
+ *
+ * a11y: فیلد توضیح همیشه رندر می‌شود (نه render-guard) تا هدف پایداری برای
+ * aria-describedby باشد و عنصر فوکوس‌شده زیر دست کاربر ناپدید نشود.
+ */
+function MessageFeedback({
+  messageId,
+  leadId,
+  businessName,
+  say,
+}: {
+  messageId: string;
+  leadId: string;
+  businessName: string;
+  say: (t: string) => void;
+}) {
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+
+  const send = async (rating: "up" | "down") => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await api<{ note: string }>("/api/feedback", {
+        method: "POST",
+        body: JSON.stringify({ leadId, messageId, rating, comment: comment.trim() }),
+      });
+      setDone(res.note);
+      say(`بازخورد پیام «${businessName}» ثبت شد. ${res.note}`);
+      setComment("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setDone(`ثبت بازخورد ناموفق بود: ${msg}`);
+      say(`ثبت بازخورد «${businessName}» ناموفق بود: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-surface-line pt-4">
+      <h4 id={`fb-h-${messageId}`} className="text-xs font-extrabold text-ink">
+        کیفیت این پیام چطور بود؟
+      </h4>
+      <p id={`fb-hint-${messageId}`} className="mt-1 text-xs leading-6 text-ink-muted">
+        اگر ایرادی داشت، توضیحش را بنویس؛ همان جمله به‌عنوان درس به پرامپت نویسنده اضافه می‌شود و
+        روی پیام‌های بعدی اثر می‌گذارد.
+      </p>
+      <label htmlFor={`fb-c-${messageId}`} className="sr-only">
+        توضیح بازخورد برای پیام {businessName}
+      </label>
+      <textarea
+        id={`fb-c-${messageId}`}
+        rows={2}
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        aria-describedby={`fb-hint-${messageId}`}
+        placeholder="مثلاً: لحن زیادی رسمی بود، برای کسب‌وکار کوچک جواب نمی‌دهد."
+        className="mt-2 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm leading-7 text-ink"
+      />
+      <div role="group" aria-labelledby={`fb-h-${messageId}`} className="mt-2 flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={() => void send("up")}
+          aria-disabled={busy}
+          aria-label={`بازخورد مثبت برای پیام ${businessName}`}
+          className={
+            busy
+              ? "rounded-lg bg-surface-dim px-4 py-2 text-sm font-bold text-ink-muted"
+              : "rounded-lg border border-brand-400 bg-surface px-4 py-2 text-sm font-bold text-brand-700 hover:bg-brand-50"
+          }
+        >
+          خوب بود
+        </button>
+        <button
+          type="button"
+          onClick={() => void send("down")}
+          aria-disabled={busy}
+          aria-label={`بازخورد منفی برای پیام ${businessName} — به درس تبدیل می‌شود`}
+          className={
+            busy
+              ? "rounded-lg bg-surface-dim px-4 py-2 text-sm font-bold text-ink-muted"
+              : "rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger hover:bg-danger-soft"
+          }
+        >
+          ایراد داشت
+        </button>
+      </div>
+      <p className={done ? "mt-2 text-xs text-ink-soft" : "sr-only"}>{done}</p>
+    </div>
+  );
+}
+
 /* ── برچسب کانال‌های ارتباط ───────────────────────────────── */
 
 const CHANNEL_LABELS: Record<ChannelKey, string> = {
@@ -2519,6 +2618,14 @@ export function Studio() {
                         دکمه‌ی «ثبت ارسال» بعد از تأیید همین پیام در این کارت ظاهر می‌شود.
                       </p>
                     )}
+
+                    {/* بازخورد کیفیت پیام — منبع دوم خودبهبودی (منبع اول: منتقد) */}
+                    <MessageFeedback
+                      messageId={m.id}
+                      leadId={m.leadId}
+                      businessName={m.businessName}
+                      say={setTaskStatus}
+                    />
 
                     {/* تأیید دوم — درجا، بدون مودال و بدون confirm مرورگر */}
                     <div

@@ -10,6 +10,7 @@ import { runServiceMatch } from "./service-match";
 import { runPortfolioSelect } from "./portfolio-select";
 import { runMessageWriter } from "./message-writer";
 import { runMessageCritic } from "./message-critic";
+import { recordLessonsFromCritic } from "./lesson-writer";
 import { checkPolicy } from "./policy-guard";
 import { CRITIC_THRESHOLDS, MAX_REVISION_ROUNDS, AFFLUENCE_THRESHOLDS } from "@/lib/config";
 import type { Message } from "@/lib/store";
@@ -434,11 +435,19 @@ export async function runLeadStep(
         portfolioMention,
       });
       await store.updateMessage(msg.id, { criticScore: critic.score });
+
+      // ── خودبهبودی: درس از معیارهای ضعیف (صفر توکن) ──
+      // این تنها جایی است که درس نوشته می‌شود؛ تا پیش از این addLesson هیچ
+      // فراخوانی نداشت و حلقه‌ی یادگیری نیمه‌کاره بود.
+      const learned = await recordLessonsFromCritic(critic);
+
       await logRun(
         "message-critic",
         "done",
-        `نمره ${critic.score}${critic.violations.length ? ` — ${critic.violations[0]}` : ""}`,
-        critic
+        `نمره ${critic.score}${critic.violations.length ? ` — ${critic.violations[0]}` : ""}${
+          learned.length ? ` · ${learned.length} درس تازه ثبت شد` : ""
+        }`,
+        { ...critic, lessonsLearned: learned }
       );
 
       // نمره قبول است یا سهمیه‌ی بازنویسی تمام شده → نهایی کن
