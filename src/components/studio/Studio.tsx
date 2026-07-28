@@ -895,8 +895,25 @@ function LeadsTable({
 
 /* ── کامپوننت اصلی ────────────────────────────────────────── */
 
+/**
+ * لفاف احراز هویت — عمداً **فقط یک هوک** دارد.
+ *
+ * ⚠️ درسی که با یک کرش کامل در پروداکشن گرفته شد: نسخه‌ی اول، `if (needsLogin)
+ * return <StudioLogin/>` را وسط بدنه‌ی خود `Studio` گذاشته بود، در حالی که
+ * ده‌ها هوک بعد از آن نقطه تعریف می‌شدند. لحظه‌ای که رمز لازم می‌شد، آن هوک‌ها
+ * اجرا نمی‌شدند و React با «hook کمتر از انتظار» کل درخت را می‌ترکاند — صفحه
+ * کاملاً سفید با «Application error»، بدون هیچ راهی برای واردکردن رمز.
+ *
+ * جداکردن لفاف این کلاس خطا را ساختاراً غیرممکن می‌کند: اینجا هیچ هوکی بعد از
+ * return شرطی وجود ندارد، و `StudioInner` یا کامل رندر می‌شود یا اصلاً نه.
+ */
 export function Studio() {
   const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
+  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} />;
+  return <StudioInner onUnauthorized={onUnauthorized} />;
+}
+
+function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
@@ -1028,17 +1045,6 @@ export function Studio() {
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
-
-  if (ready && needsLogin) {
-    return (
-      <StudioLogin
-        onSaved={() => {
-          onLoggedIn();
-          void bootstrap();
-        }}
-      />
-    );
-  }
 
   async function selectCampaign(id: string) {
     setSelectedId(id);

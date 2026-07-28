@@ -130,8 +130,18 @@ const STATE_LABELS: Record<string, string> = {
   closed: "بسته شد",
 };
 
+/**
+ * لفاف احراز هویت — عمداً فقط یک هوک دارد و هیچ هوکی بعد از return شرطی نیست.
+ * (همان کلاس خطایی که در Studio.tsx کل صفحه را ترکاند: return زودهنگام وسط
+ * بدنه‌ای که هوک‌های بعدی دارد، قانون هوک‌ها را می‌شکند.)
+ */
 export function Crm() {
   const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
+  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} />;
+  return <CrmInner onUnauthorized={onUnauthorized} />;
+}
+
+function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [from, setFrom] = useState(daysAgo(30));
   const [to, setTo] = useState(ymd(new Date()));
   const [campaignId, setCampaignId] = useState("");
@@ -181,17 +191,6 @@ export function Crm() {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  if (ready && needsLogin) {
-    return (
-      <StudioLogin
-        onSaved={() => {
-          onLoggedIn();
-          void load(false);
-        }}
-      />
-    );
-  }
 
   const shown = useMemo(
     () => (data ? data.events.filter((e) => kindFilter === "all" || e.kind === kindFilter) : []),
