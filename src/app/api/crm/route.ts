@@ -136,6 +136,22 @@ export async function GET(req: NextRequest) {
   /* ── رویدادها از دو منبع ── */
   const events: CrmEvent[] = [];
 
+  /*
+    رکورد تصمیم‌های پیام، `entityId` را روی **شناسه‌ی پیام** می‌گذارند نه لید.
+    بدون این نگاشت، دو مهم‌ترین ردیف دفترچه («پیام تأیید شد»، «پیام ارسال شد»)
+    بدون نام کسب‌وکار نمایش داده می‌شدند — در تست زنده دقیقاً همین دیده شد.
+  */
+  const messageToLead = new Map(allMessages.map((m) => [m.id, m.leadId]));
+  const subjectOf = (a: AuditEntry): string | null => {
+    if (!a.entityId) return null;
+    if (a.entityType === "campaign") return campaignName.get(a.entityId) ?? null;
+    if (a.entityType === "message") {
+      const lid = messageToLead.get(a.entityId);
+      return lid ? leadName.get(lid) ?? null : null;
+    }
+    return leadName.get(a.entityId) ?? null;
+  };
+
   for (const a of audit as AuditEntry[]) {
     events.push({
       id: `audit:${a.id}`,
@@ -143,10 +159,7 @@ export async function GET(req: NextRequest) {
       kind: "decision",
       action: a.action,
       label: AUDIT_LABELS[a.action] ?? a.action,
-      subject:
-        (a.entityType === "campaign" && a.entityId ? campaignName.get(a.entityId) : null) ??
-        (a.entityId ? leadName.get(a.entityId) : null) ??
-        null,
+      subject: subjectOf(a),
       detail: a.reason ?? "",
       ok: true,
     });

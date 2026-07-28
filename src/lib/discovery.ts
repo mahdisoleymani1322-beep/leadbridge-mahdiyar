@@ -68,9 +68,24 @@ export type DiscoverySummary = {
  */
 const DISCOVERY_BUDGET_MS = 45_000;
 
+/**
+ * سهم **تضمین‌شده‌ی** استخراج کانال‌ها از بودجه.
+ *
+ * چرا لازم شد: بعد از موازی‌کردن منابع، هر دو تا نزدیک مهلت کار می‌کردند و
+ * برای خواندن سایت‌ها چیزی نمی‌ماند. نتیجه در تست زنده: `skipHtml` روشن شد،
+ * لیدها بدون راه تماس ماندند و **۷ از ۸ لید نامعتبر رد شدند** — یعنی کشف
+ * موفق بود ولی خروجی‌اش تقریباً صفر.
+ *
+ * حالا منابع فقط تا `deadlineAt - EXTRACTION_RESERVE_MS` وقت دارند و بقیه
+ * دست‌نخورده برای استخراج می‌ماند. لیدِ بدون راه تماس اصلاً به درد نمی‌خورد،
+ * پس این سهم از خودِ کشف مهم‌تر است.
+ */
+const EXTRACTION_RESERVE_MS = 20_000;
+
 export async function runDiscovery(campaignId: string): Promise<DiscoverySummary> {
   const started = Date.now();
   const deadlineAt = started + DISCOVERY_BUDGET_MS;
+  const sourceDeadlineAt = deadlineAt - EXTRACTION_RESERVE_MS;
   const timeLeft = () => deadlineAt - Date.now();
   const store = getStore();
 
@@ -119,7 +134,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     const seen = new Set<string>();
     for (const term of queryTermsFor(campaign.market)) {
       if (out.length >= limit) break;
-      if (timeLeft() < 12_000) break;
+      if (Date.now() >= sourceDeadlineAt) break;
       try {
         const { places } = await textSearch(term, campaign.city, {
           max: Math.min(20, limit - out.length),
@@ -143,8 +158,7 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       queryTermsFor(campaign.market),
       campaign.city,
       Math.min(limit, WEB_SEARCH.maxLeadsPerRun),
-      // ۱۲ ثانیه برای استخراج کانال‌ها و درج در دیتابیس کنار گذاشته می‌شود
-      deadlineAt - 12_000
+      sourceDeadlineAt
     );
   };
 
@@ -332,6 +346,13 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     summary.notes.push(
       `${summary.found} کسب‌وکار پیدا شد ولی هیچ‌کدام تازه نبودند ` +
         `(${summary.duplicates} تکراری، ${summary.invalid} بدون راه تماس معتبر).`
+    );
+  } else if (summary.invalid > summary.inserted) {
+    // در تست زنده ۷ از ۸ لید بی‌صدا رد شدند؛ بدون این هشدار، مالک فقط
+    // «۱ لید جدید» می‌دید و نمی‌فهمید چرا این‌قدر کم است.
+    summary.notes.push(
+      `${summary.invalid} کسب‌وکار به‌خاطر نداشتن راه تماس عمومی رد شدند. ` +
+        `اگر این عدد همیشه بالاست، احتمالاً سایت‌هایشان در مهلت کشف باز نشده‌اند.`
     );
   }
   if (Date.now() >= deadlineAt) {

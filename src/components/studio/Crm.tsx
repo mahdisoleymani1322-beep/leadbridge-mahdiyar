@@ -462,6 +462,9 @@ export function Crm() {
         </section>
       )}
 
+      {/* ── درس‌های آموخته‌شده ── */}
+      <Lessons say={setStatus} />
+
       {/* ── دفترچه‌ی تصمیم ── */}
       {data && (
         <section aria-labelledby="log-heading">
@@ -539,6 +542,96 @@ export function Crm() {
         </section>
       )}
     </div>
+  );
+}
+
+type LessonRow = {
+  id: string;
+  agent: string;
+  lesson: string;
+  source: "critic" | "human";
+  createdAt: string;
+};
+
+/**
+ * درس‌های آموخته‌شده — خروجی قابل‌مشاهده‌ی حلقه‌ی خودبهبودی.
+ *
+ * بدون این بخش، سیستم بی‌سروصدا روی پیام‌های بعدی اثر می‌گذاشت و مالک نه
+ * می‌دید چه یاد گرفته شده و نه می‌توانست درسِ غلط را پس بگیرد.
+ */
+function Lessons({ say }: { say: (t: string) => void }) {
+  const [rows, setRows] = useState<LessonRow[] | null>(null);
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const j = await apiFetch<{ lessons: LessonRow[] }>("/api/lessons");
+      setRows(j.lessons);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const disable = async (l: LessonRow) => {
+    try {
+      await apiFetch("/api/lessons", {
+        method: "PATCH",
+        body: JSON.stringify({ id: l.id, active: false }),
+      });
+      say("درس غیرفعال شد و دیگر به پرامپت تزریق نمی‌شود.");
+      await load();
+    } catch (e) {
+      say(`غیرفعال‌کردن درس ناموفق بود: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  return (
+    <section aria-labelledby="lessons-heading">
+      <h2 id="lessons-heading" className="mb-2 text-lg font-extrabold text-ink">
+        درس‌های آموخته‌شده {rows ? `(${fa(rows.length)})` : ""}
+      </h2>
+      <p className="mb-4 text-xs leading-6 text-ink-muted">
+        این جمله‌ها به پرامپت نویسنده‌ی پیام تزریق می‌شوند و روی همه‌ی پیام‌های بعدی اثر می‌گذارند.
+        منبعشان یا نمره‌ی پایین منتقد است یا بازخورد خودت. اگر درسی اشتباه بود، غیرفعالش کن.
+      </p>
+      <p className={err ? "mb-3 text-sm text-danger" : "sr-only"}>{err}</p>
+
+      {rows && rows.length === 0 ? (
+        <p className="rounded-xl border border-surface-line bg-surface p-5 text-sm text-ink-muted shadow-card">
+          هنوز درسی ثبت نشده. وقتی منتقد به پیامی نمره‌ی پایین بدهد، یا در کارت پیام «ایراد داشت» را
+          با توضیح بزنی، اینجا پر می‌شود.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {(rows ?? []).map((l) => (
+            <li
+              key={l.id}
+              className="rounded-lg border border-surface-line bg-surface px-4 py-3 shadow-card"
+            >
+              <p className="text-sm leading-7 text-ink">{l.lesson}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <span className="text-xs text-ink-muted">
+                  منبع: {l.source === "critic" ? "منتقد" : "بازخورد تو"} · ایجنت: {l.agent} ·{" "}
+                  {jalali(l.createdAt)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void disable(l)}
+                  aria-label={`غیرفعال‌کردن درس: ${l.lesson.slice(0, 40)}`}
+                  className="rounded-lg border border-danger/70 bg-surface px-3 py-1 text-xs font-bold text-danger hover:bg-danger-soft"
+                >
+                  غیرفعال کن
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
