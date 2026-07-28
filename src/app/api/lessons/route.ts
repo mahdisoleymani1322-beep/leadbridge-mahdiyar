@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getStore } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
+import { handleBulkDelete } from "@/lib/delete-route";
 
 export const dynamic = "force-dynamic";
 
@@ -42,4 +43,15 @@ export async function PATCH(req: NextRequest) {
   }
   await getStore().deactivateLesson(id);
   return Response.json({ ok: true });
+}
+
+/**
+ * DELETE — حذف نرم انبوه. بدنه: { ids: string[] }
+ * حذف می‌شود: درس آموخته‌شده.
+ *
+ * ردیف واقعاً پاک نمی‌شود (`deleted_at` می‌گیرد) و از صفحه‌ی سطل زباله قابل
+ * بازگرداندن است. دلیلش در `store/types.ts → SoftDeleteFields`.
+ */
+export async function DELETE(req: NextRequest) {
+  return handleBulkDelete(req, "lesson");
 }

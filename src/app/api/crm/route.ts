@@ -228,6 +228,9 @@ export async function GET(req: NextRequest) {
       const c = convByLead.get(l.id) ?? null;
       return {
         leadId: l.id,
+        // شناسه‌ی خودِ رکورد گفت‌وگو — هدف دکمه‌ی حذف پیگیری. اگر پاسخی ثبت
+        // نشده باشد null است و آن کارت چیزی برای حذف ندارد.
+        conversationId: c?.id ?? null,
         businessName: l.businessName,
         status: l.status,
         channel: l.preferredChannel,

@@ -171,6 +171,23 @@ create table if not exists audit_log (
   created_at  timestamptz not null default now()
 );
 
+-- ── حذف نرم (مهاجرت ۶) ──
+--
+-- ردیف حذف‌شده پاک نمی‌شود، فقط deleted_at می‌گیرد. دلیل کاملش در
+-- supabase/migrations/006_soft_delete.sql است؛ خلاصه‌اش: leads.dedup_key یکتاست
+-- و پاک‌کردن واقعیِ ردیف، کلید را آزاد می‌کند و کشف بعدی همان لید را دوباره
+-- می‌آورد. deleted_batch دسته‌ی یک حذف آبشاری را برای بازگردانی نگه می‌دارد.
+do $$
+declare
+  t text;
+begin
+  foreach t in array array['campaigns','leads','messages','conversations','lessons','agent_runs','audit_log']
+  loop
+    execute format('alter table %I add column if not exists deleted_at timestamptz', t);
+    execute format('alter table %I add column if not exists deleted_batch uuid', t);
+  end loop;
+end $$;
+
 -- ── ایندکس‌ها ──
 create index if not exists idx_leads_status      on leads(status);
 create index if not exists idx_leads_campaign    on leads(campaign_id);

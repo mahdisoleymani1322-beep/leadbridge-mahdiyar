@@ -67,6 +67,8 @@ async function addLessonOnce(agent: string, text: string, source: Lesson["source
     source,
     active: true,
     createdAt: new Date().toISOString(),
+    deletedAt: null,
+    deletedBatch: null,
   });
   return true;
 }

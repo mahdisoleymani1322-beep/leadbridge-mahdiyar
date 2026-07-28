@@ -28,6 +28,13 @@ import {
   withSignature,
 } from "@/lib/brand";
 import { apiFetch, StudioLogin, UnauthorizedError, useStudioAuth } from "./auth-client";
+import {
+  DeleteBar,
+  RowCheckbox,
+  SelectAllCheckbox,
+  useBulkSelect,
+  useSentWarning,
+} from "./bulk-delete";
 
 /** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
 const fa = (n: number | string) => new Intl.NumberFormat("fa-IR").format(Number(n));
@@ -670,6 +677,7 @@ function LeadsTable({
   idPrefix,
   selectedIds,
   onToggleSelect,
+  onToggleAll,
   openId,
   onTogglePanel,
   triggerRefs,
@@ -691,6 +699,7 @@ function LeadsTable({
   idPrefix: string;
   selectedIds: Set<string>;
   onToggleSelect: (id: string) => void;
+  onToggleAll: (ids: string[]) => void;
   openId: string | null;
   onTogglePanel: (id: string, prefix: string) => void;
   triggerRefs: React.MutableRefObject<Record<string, HTMLButtonElement | null>>;
@@ -727,8 +736,19 @@ function LeadsTable({
         <caption className="sr-only">{captionText}</caption>
         <thead className="bg-surface-dim text-xs text-ink-muted">
           <tr>
+            {/*
+              این سلول تا امروز خالی بود و فقط یک متن پنهان داشت — یعنی ستون
+              چک‌باکس‌ها هیچ سرستونی نداشت. حالا چک‌باکس «انتخاب همه» خودش
+              اینجاست و برچسبش تعداد را می‌گوید.
+            */}
             <th scope="col" className="px-3 py-3 font-semibold">
-              <span className="sr-only">تیک انتخاب گروهی</span>
+              <SelectAllCheckbox
+                id={`${idPrefix}-sel-all`}
+                visibleIds={leads.map((l) => l.id)}
+                selected={selectedIds}
+                onToggleAll={onToggleAll}
+                label={`انتخاب هر ${fa(leads.length)} لید این جدول`}
+              />
             </th>
             <th scope="col" className="px-4 py-3 font-semibold">کسب‌وکار</th>
             <th scope="col" className="px-4 py-3 font-semibold">کانال‌های ارتباط</th>
@@ -928,9 +948,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [batchRunning, setBatchRunning] = useState(false);
   const [msgGenRunning, setMsgGenRunning] = useState(false);
   const [igDrafts, setIgDrafts] = useState<Record<string, string>>({});
-  // انتخاب چک‌باکسی — هر جدول Set خودش را دارد تا انتخاب‌ها قاطی نشوند
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [shortSelectedIds, setShortSelectedIds] = useState<Set<string>>(new Set());
+  // انتخاب چک‌باکسی — هر فهرست Set خودش را دارد تا انتخاب‌ها قاطی نشوند.
+  // همان انتخاب، دو کار می‌کند: جابه‌جایی بین فهرست‌ها و حذف.
+  const leadSel = useBulkSelect();
+  const shortSel = useBulkSelect();
+  const msgSel = useBulkSelect();
+  const campSel = useBulkSelect();
   const [remaining, setRemaining] = useState<number | null>(null);
   // کانال اعلان زنده‌ی جدا. nonce لازم است: اگر متن دقیقاً تکراری باشد، React
   // گره‌ی متنی را عوض نمی‌کند و screen reader چیزی اعلام نمی‌کند.
@@ -964,6 +987,8 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   // سرتیتر هر بخش — بعد از جابه‌جایی انبوه، فوکوس به مقصد می‌رود
   const leadsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const shortlistHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const campaignsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const messagesHeadingRef = useRef<HTMLHeadingElement | null>(null);
 
   // فوکوس روی دکمه‌ی تأیید نهایی — همین جابه‌جایی خودش «اعلانِ» مسلح‌شدن است
   useEffect(() => {
@@ -1045,6 +1070,30 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
+
+  /**
+   * بعد از حذف کمپین.
+   *
+   * اگر کمپینِ فعال حذف شده باشد، `selectedId` به چیزی اشاره می‌کند که دیگر
+   * نیست: جدول لیدها خالی می‌ماند و دکمه‌ی «کشف لید» روی یک شناسه‌ی مرده کار
+   * می‌کند. پس به اولین کمپین باقی‌مانده سوییچ می‌شود.
+   */
+  async function afterCampaignDelete() {
+    const cs = await loadCampaigns();
+    if (cs.some((c) => c.id === selectedId)) {
+      if (selectedId) await loadLeads(selectedId);
+      return;
+    }
+    const next = cs[0]?.id ?? "";
+    setSelectedId(next);
+    if (next) {
+      await loadLeads(next);
+      await loadMessages(next);
+    } else {
+      setLeads([]);
+      setMessages([]);
+    }
+  }
 
   async function selectCampaign(id: string) {
     setSelectedId(id);
@@ -1391,36 +1440,18 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   /* ── فهرست منتخب ────────────────────────────────────────── */
 
-  const toggleSelect = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleShortSelect = useCallback((id: string) => {
-    setShortSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
   /** لیدهای تیک‌خورده را به فهرست منتخب می‌فرستد (یک درخواست، صفر توکن) */
   async function addToShortlist() {
-    if (selectedIds.size === 0 || !selectedId) return;
+    if (leadSel.selected.size === 0 || !selectedId) return;
     setBusy("shortlist");
     setError("");
     try {
-      const ids = Array.from(selectedIds);
+      const ids = Array.from(leadSel.selected);
       const res = await api<{ updated: number }>("/api/leads", {
         method: "PATCH",
         body: JSON.stringify({ ids, shortlisted: true }),
       });
-      setSelectedIds(new Set());
+      leadSel.clear();
       // پنل باز را ببند: کلیدش شامل پیشوند جدول است («all:leadX»)، و لیدی که
       // جابه‌جا می‌شود دیگر در آن جدول نیست — پس کلید هرگز دوباره جور نمی‌شود
       // و بازگرداندن فوکوس به یک گره جداشده اشاره می‌کند.
@@ -1439,16 +1470,16 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   /** لیدهای تیک‌خورده‌ی منتخب را به فهرست اصلی برمی‌گرداند */
   async function removeFromShortlist() {
-    if (shortSelectedIds.size === 0 || !selectedId) return;
+    if (shortSel.selected.size === 0 || !selectedId) return;
     setBusy("shortlist");
     setError("");
     try {
-      const ids = Array.from(shortSelectedIds);
+      const ids = Array.from(shortSel.selected);
       const res = await api<{ updated: number }>("/api/leads", {
         method: "PATCH",
         body: JSON.stringify({ ids, shortlisted: false }),
       });
-      setShortSelectedIds(new Set());
+      shortSel.clear();
       setOpenId(null); // همان دلیل addToShortlist
       await loadLeads(selectedId);
       leadsHeadingRef.current?.focus();
@@ -1697,6 +1728,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   const canGenerateAll = shortReadyForMessage > 0 && shortUnanalyzed === 0;
 
   const visibleMessages = msgFilter === "all" ? messages : messages.filter((m) => m.status === msgFilter);
+  // حذف پیام تأییدشده/ارسال‌شده، قیف تبدیل بازه‌های گذشته را عقب می‌برد چون
+  // صفحه‌ی CRM قیف را از روی messages.status می‌سازد. متن تأیید باید بگویدش.
+  const sentWarning = useSentWarning(
+    Array.from(msgSel.selected),
+    useCallback((id: string) => messages.find((m) => m.id === id)?.status, [messages])
+  );
   const blockedCount = messages.filter((m) => m.policy.verdict === "BLOCK").length;
   const reviewCount = messages.filter((m) => m.policy.verdict === "HUMAN_REVIEW").length;
   const readyCount = messages.filter(
@@ -1849,7 +1886,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       {/* ── کمپین‌ها ── */}
       <section aria-labelledby="campaigns-heading">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="campaigns-heading" className="text-lg font-extrabold text-ink">
+          <h2
+            id="campaigns-heading"
+            ref={campaignsHeadingRef}
+            tabIndex={-1}
+            className="text-lg font-extrabold text-ink"
+          >
             کمپین‌ها ({campaigns.length})
           </h2>
           <div role="group" aria-label="عملیات کمپین انتخابی" className="flex flex-wrap items-center gap-3">
@@ -1902,30 +1944,73 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             هنوز کمپینی نداری. یکی بساز تا شروع کنیم.
           </p>
         ) : (
-          <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {campaigns.map((c) => {
-              const active = c.id === selectedId;
-              return (
-                <li key={c.id}>
-                  <button
-                    type="button"
-                    onClick={() => selectCampaign(c.id)}
-                    aria-pressed={active}
-                    className={`w-full rounded-xl border p-4 text-right shadow-card transition-colors ${
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-4">
+              <span className="flex items-center gap-2 text-sm text-ink">
+                <SelectAllCheckbox
+                  id="camp-sel-all"
+                  visibleIds={campaigns.map((c) => c.id)}
+                  selected={campSel.selected}
+                  onToggleAll={campSel.toggleAll}
+                  label={`انتخاب هر ${fa(campaigns.length)} کمپین برای حذف`}
+                />
+                <span aria-hidden="true">انتخاب همه</span>
+              </span>
+              <DeleteBar
+                kind="campaign"
+                ids={campSel.visibleSelected(campaigns.map((c) => c.id))}
+                endpoint="/api/campaigns"
+                say={setTaskStatus}
+                onDone={async () => {
+                  campSel.clear();
+                  setOpenId(null);
+                  await afterCampaignDelete();
+                }}
+                refocus={() => campaignsHeadingRef.current?.focus()}
+                extraWarning="همه‌ی لیدها، پیام‌ها، تحلیل‌ها و پیگیری‌های این کمپین‌ها هم با آن‌ها می‌روند."
+              />
+            </div>
+
+            <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {campaigns.map((c) => {
+                const active = c.id === selectedId;
+                return (
+                  <li
+                    key={c.id}
+                    className={`flex items-start gap-3 rounded-xl border p-4 shadow-card transition-colors ${
                       active
                         ? "border-brand-400 bg-brand-50"
                         : "border-surface-line bg-surface hover:border-brand-300"
                     }`}
                   >
-                    <span className="block font-bold text-ink">{c.name}</span>
-                    <span className="mt-1 block text-xs text-ink-muted">
-                      شهر: {c.city} · سقف کشف روزانه: {c.dailyDiscoveryLimit}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                    {/*
+                      چک‌باکس بیرون دکمه است، نه داخلش: چک‌باکس داخل <button>
+                      هم HTML نامعتبر است هم کلیکش به دکمه‌ی والد می‌رسد.
+                      برچسبش صریحاً «برای حذف» می‌گوید تا با انتخابِ «کمپین
+                      فعال» (که aria-pressed دارد) اشتباه نشود.
+                    */}
+                    <RowCheckbox
+                      id={`camp-sel-${c.id}`}
+                      checked={campSel.selected.has(c.id)}
+                      onToggle={() => campSel.toggle(c.id)}
+                      label={`انتخاب کمپین ${c.name} برای حذف`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => selectCampaign(c.id)}
+                      aria-pressed={active}
+                      className="flex-1 rounded text-right"
+                    >
+                      <span className="block font-bold text-ink">{c.name}</span>
+                      <span className="mt-1 block text-xs text-ink-muted">
+                        شهر: {c.city} · سقف کشف روزانه: {c.dailyDiscoveryLimit}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
       </section>
 
@@ -2040,22 +2125,22 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           <button
             type="button"
             onClick={() => {
-              if (selectedIds.size === 0 || busy === "shortlist") return;
+              if (leadSel.selected.size === 0 || busy === "shortlist") return;
               void addToShortlist();
             }}
-            aria-disabled={selectedIds.size === 0 || busy === "shortlist"}
+            aria-disabled={leadSel.selected.size === 0 || busy === "shortlist"}
             aria-describedby={
-              selectedIds.size === 0 ? "shortlist-hint shortlist-gate-note" : "shortlist-hint"
+              leadSel.selected.size === 0 ? "shortlist-hint shortlist-gate-note" : "shortlist-hint"
             }
             className={
-              selectedIds.size === 0 || busy === "shortlist"
+              leadSel.selected.size === 0 || busy === "shortlist"
                 ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
                 : "rounded-lg bg-brass-dark px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brass"
             }
           >
             {busy === "shortlist"
               ? "در حال افزودن…"
-              : `افزودن ${fa(selectedIds.size)} لید انتخاب‌شده به فهرست منتخب`}
+              : `افزودن ${fa(leadSel.selected.size)} لید انتخاب‌شده به فهرست منتخب`}
           </button>
         </div>
         <p id="shortlist-hint" className="mb-4 text-xs leading-6 text-ink-muted">
@@ -2063,14 +2148,34 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           «فهرست منتخب» بفرست؛ آنجا بدون شلوغیِ بقیه‌ی لیدها روی همان‌ها کار می‌کنی.
         </p>
 
+        {/* همان انتخاب بالا، کار دوم: حذف. عمداً زیر راهنما تا اول مسیر اصلی
+            (فرستادن به منتخب) دیده شود، نه کار مخرب. */}
+        <div className="mb-4">
+          <DeleteBar
+            kind="lead"
+            ids={leadSel.visibleSelected(unshortlisted.map((l) => l.id))}
+            endpoint="/api/leads"
+            say={setTaskStatus}
+            onDone={async () => {
+              leadSel.clear();
+              setOpenId(null); // کلید پنل باز شامل شناسه‌ی لیدِ رفته است
+              if (selectedId) await loadLeads(selectedId);
+              await loadMessages(selectedId).catch(() => {});
+            }}
+            refocus={() => leadsHeadingRef.current?.focus()}
+            extraWarning="پیام‌ها، تحلیل و پیگیریِ این لیدها هم با آن‌ها می‌روند."
+          />
+        </div>
+
         <LeadsTable
           leads={unshortlisted}
           regionLabel="جدول همه‌ی لیدها"
           captionText="همه‌ی لیدهای کشف‌شده‌ی کمپین که هنوز به فهرست منتخب نرفته‌اند، از بالاترین توان مالی به پایین‌ترین. ستون «توان مالی» تخمینی از نشانه‌های عمومی است، نه درآمد واقعی."
           emptyText={busy === "load" ? "در حال بارگذاری…" : "لیدی نیست. «کشف لید» را بزن."}
           idPrefix="all"
-          selectedIds={selectedIds}
-          onToggleSelect={toggleSelect}
+          selectedIds={leadSel.selected}
+          onToggleSelect={leadSel.toggle}
+          onToggleAll={leadSel.toggleAll}
           openId={openId}
           onTogglePanel={togglePanel}
           triggerRefs={triggerRefs}
@@ -2105,20 +2210,20 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           <button
             type="button"
             onClick={() => {
-              if (shortSelectedIds.size === 0 || busy === "shortlist") return;
+              if (shortSel.selected.size === 0 || busy === "shortlist") return;
               void removeFromShortlist();
             }}
-            aria-disabled={shortSelectedIds.size === 0 || busy === "shortlist"}
-            aria-describedby={shortSelectedIds.size === 0 ? "unshortlist-gate-note" : undefined}
+            aria-disabled={shortSel.selected.size === 0 || busy === "shortlist"}
+            aria-describedby={shortSel.selected.size === 0 ? "unshortlist-gate-note" : undefined}
             className={
-              shortSelectedIds.size === 0 || busy === "shortlist"
+              shortSel.selected.size === 0 || busy === "shortlist"
                 ? "rounded-lg border border-ink-muted bg-surface px-4 py-2 text-sm font-bold text-ink-muted"
                 : "rounded-lg border border-danger/70 bg-surface px-4 py-2 text-sm font-bold text-danger transition-colors hover:bg-danger-soft"
             }
           >
             {busy === "shortlist"
               ? "در حال برگرداندن…"
-              : `برگرداندن ${fa(shortSelectedIds.size)} لید به فهرست اصلی`}
+              : `برگرداندن ${fa(shortSel.selected.size)} لید به فهرست اصلی`}
           </button>
         </div>
 
@@ -2193,14 +2298,32 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           امتیازدهی نشده باشد کار نمی‌کند — سرور هم جلویش را می‌گیرد، نه فقط این صفحه.
         </p>
 
+        <div className="mb-4">
+          <DeleteBar
+            kind="lead"
+            ids={shortSel.visibleSelected(shortlisted.map((l) => l.id))}
+            endpoint="/api/leads"
+            say={setTaskStatus}
+            onDone={async () => {
+              shortSel.clear();
+              setOpenId(null);
+              if (selectedId) await loadLeads(selectedId);
+              await loadMessages(selectedId).catch(() => {});
+            }}
+            refocus={() => shortlistHeadingRef.current?.focus()}
+            extraWarning="پیام‌ها، تحلیل و پیگیریِ این لیدها هم با آن‌ها می‌روند."
+          />
+        </div>
+
         <LeadsTable
           leads={shortlisted}
           regionLabel="جدول فهرست منتخب"
           captionText="لیدهای منتخب، از بالاترین توان مالی به پایین‌ترین. اینجا هر لید را جدا تحلیل و پیام‌سازی می‌کنی."
           emptyText="هنوز لیدی انتخاب نکرده‌ای. از جدول بالا تیک بزن و «افزودن به فهرست منتخب» را بزن."
           idPrefix="short"
-          selectedIds={shortSelectedIds}
-          onToggleSelect={toggleShortSelect}
+          selectedIds={shortSel.selected}
+          onToggleSelect={shortSel.toggle}
+          onToggleAll={shortSel.toggleAll}
           openId={openId}
           onTogglePanel={togglePanel}
           triggerRefs={triggerRefs}
@@ -2218,7 +2341,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
       {/* ── پیام‌ها (تأیید انسانی — فاز ۴) ── */}
       <section aria-labelledby="messages-heading">
-        <h2 id="messages-heading" className="mb-2 text-lg font-extrabold text-ink">
+        <h2
+          id="messages-heading"
+          ref={messagesHeadingRef}
+          tabIndex={-1}
+          className="mb-2 text-lg font-extrabold text-ink"
+        >
           پیام‌ها ({fa(messages.length)})
         </h2>
 
@@ -2252,13 +2380,17 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
                     checked={msgFilter === f.id}
                     onChange={() => {
                       setMsgFilter(f.id);
+                      msgSel.clear();
                       // تغییر فیلتر، فهرست را عوض می‌کند؛ بدون اعلام، کاربر
                       // screen reader نمی‌فهمد چند پیام ماند (WCAG 4.1.3)
                       const n =
                         f.id === "all"
                           ? messages.length
                           : messages.filter((x) => x.status === f.id).length;
-                      setTaskStatus(`فیلتر «${f.label}» اعمال شد. ${fa(n)} پیام نمایش داده می‌شود.`);
+                      setTaskStatus(
+                        `فیلتر «${f.label}» اعمال شد. ${fa(n)} پیام نمایش داده می‌شود.` +
+                          (msgSel.selected.size > 0 ? " انتخاب قبلی پاک شد." : "")
+                      );
                     }}
                     className="h-6 w-6 accent-brand-600"
                   />
@@ -2267,6 +2399,43 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
               ))}
             </div>
           </fieldset>
+        )}
+
+        {messages.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-4">
+            {/*
+              «انتخاب همه» فقط پیام‌های **دیده‌شده** را می‌گیرد، نه کل پیام‌ها.
+              وگرنه با فیلتر «مسدود» یک کلیک، پیام‌های تأییدشده و ارسال‌شده را
+              هم بی‌صدا وارد انتخاب می‌کرد — دقیقاً جایی که حذف انبوهِ ناخواسته
+              اتفاق می‌افتد.
+            */}
+            <span className="flex items-center gap-2 text-sm text-ink">
+              <SelectAllCheckbox
+                id="msg-sel-all"
+                visibleIds={visibleMessages.map((m) => m.id)}
+                selected={msgSel.selected}
+                onToggleAll={msgSel.toggleAll}
+                label={`انتخاب هر ${fa(visibleMessages.length)} پیام نمایش‌داده‌شده`}
+              />
+              <span aria-hidden="true">انتخاب همه</span>
+            </span>
+            <DeleteBar
+              kind="message"
+              ids={msgSel.visibleSelected(visibleMessages.map((m) => m.id))}
+              endpoint="/api/messages"
+              say={setTaskStatus}
+              onDone={async () => {
+                msgSel.clear();
+                setArmed(null);
+                if (selectedId) {
+                  await loadMessages(selectedId);
+                  await loadLeads(selectedId).catch(() => {});
+                }
+              }}
+              refocus={() => messagesHeadingRef.current?.focus()}
+              extraWarning={sentWarning}
+            />
+          </div>
         )}
 
         {visibleMessages.length === 0 ? (
@@ -2293,18 +2462,26 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
                     aria-labelledby={`msg-h-${m.id}`}
                     className="rounded-xl border border-surface-line bg-surface p-5 shadow-card"
                   >
-                    {/* عنوان = هویت + وضعیت؛ جزئیات متغیر در توضیح جدا (m1) */}
-                    <h3
-                      id={`msg-h-${m.id}`}
-                      tabIndex={-1}
-                      ref={(el) => {
-                        cardHeadingRefs.current[m.id] = el;
-                      }}
-                      aria-describedby={`msg-state-${m.id}`}
-                      className="text-base font-extrabold leading-7 text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass"
-                    >
-                      {m.businessName} — {MSG_STATUS_LABELS[m.status]}
-                    </h3>
+                    <div className="flex items-start gap-3">
+                      <RowCheckbox
+                        id={`msg-sel-${m.id}`}
+                        checked={msgSel.selected.has(m.id)}
+                        onToggle={() => msgSel.toggle(m.id)}
+                        label={`انتخاب پیام ${m.businessName} برای حذف`}
+                      />
+                      {/* عنوان = هویت + وضعیت؛ جزئیات متغیر در توضیح جدا (m1) */}
+                      <h3
+                        id={`msg-h-${m.id}`}
+                        tabIndex={-1}
+                        ref={(el) => {
+                          cardHeadingRefs.current[m.id] = el;
+                        }}
+                        aria-describedby={`msg-state-${m.id}`}
+                        className="flex-1 text-base font-extrabold leading-7 text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass"
+                      >
+                        {m.businessName} — {MSG_STATUS_LABELS[m.status]}
+                      </h3>
+                    </div>
                     <p id={`msg-state-${m.id}`} className="mt-1 text-xs text-ink-muted">
                       کانال: {m.targetChannel ? CHANNEL_LABELS[m.targetChannel] : "نامشخص"} ·{" "}
                       {VERDICT_LABELS[m.policy.verdict]}

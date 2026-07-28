@@ -36,6 +36,8 @@ export async function recordDecision(input: {
       beforeData: input.beforeData ?? null,
       afterData: input.afterData ?? null,
       createdAt: new Date().toISOString(),
+      deletedAt: null,
+      deletedBatch: null,
     });
   } catch {
     /* ثبت تصمیم best-effort است — کار اصلی نباید به‌خاطرش شکست بخورد */

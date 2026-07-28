@@ -6,6 +6,7 @@ import { CHANNEL_PRIORITY } from "@/lib/config";
 import { computeDedupKey } from "@/lib/agents/validation";
 import { recordDecision } from "@/lib/audit";
 import { pickPreferredChannel } from "@/lib/integrations/contact-channels";
+import { handleBulkDelete } from "@/lib/delete-route";
 
 export const dynamic = "force-dynamic";
 
@@ -138,6 +139,8 @@ function buildManualLead(raw: any, campaignId: string | null): Lead | null {
     dedupKey,
     createdAt: now,
     updatedAt: now,
+    deletedAt: null,
+    deletedBatch: null,
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -184,4 +187,15 @@ export async function POST(req: NextRequest) {
   }
 
   return Response.json({ inserted, duplicates, invalid, leadIds }, { status: 201 });
+}
+
+/**
+ * DELETE — حذف نرم انبوه. بدنه: { ids: string[] }
+ * حذف می‌شود: لید + پیام‌ها، گفت‌وگو، اجراهای ایجنت و دفترچه‌ی تصمیمش.
+ *
+ * ردیف واقعاً پاک نمی‌شود (`deleted_at` می‌گیرد) و از صفحه‌ی سطل زباله قابل
+ * بازگرداندن است. دلیلش در `store/types.ts → SoftDeleteFields`.
+ */
+export async function DELETE(req: NextRequest) {
+  return handleBulkDelete(req, "lead");
 }

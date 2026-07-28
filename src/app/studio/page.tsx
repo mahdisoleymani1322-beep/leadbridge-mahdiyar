@@ -19,12 +19,24 @@ export default function StudioPage() {
           بعد لیدهای خوب را منتخب کن، تحلیل بگیر و برایشان پیام بساز.
         </p>
         <nav aria-label="بخش‌های دیگر" className="mt-3 text-sm">
-          <Link
-            href="/studio/crm"
-            className="text-brand-700 underline underline-offset-4 hover:text-brand-600"
-          >
-            CRM — دفترچه‌ی تصمیم، پیگیری و آمار تبدیل
-          </Link>
+          <ul className="flex flex-wrap gap-4">
+            <li>
+              <Link
+                href="/studio/crm"
+                className="text-brand-700 underline underline-offset-4 hover:text-brand-600"
+              >
+                CRM — دفترچه‌ی تصمیم، پیگیری و آمار تبدیل
+              </Link>
+            </li>
+            <li>
+              <Link
+                href="/studio/trash"
+                className="text-brand-700 underline underline-offset-4 hover:text-brand-600"
+              >
+                سطل زباله — بازگرداندن موارد حذف‌شده
+              </Link>
+            </li>
+          </ul>
         </nav>
       </header>
       <Studio />

@@ -96,6 +96,15 @@ export async function runLeadStep(
   const store = getStore();
   const lead = await store.getLead(leadId);
   if (!lead) throw new Error("لید یافت نشد.");
+  // همان گارد runLeadStep — شرحش آنجاست
+  if (lead.deletedAt) throw new Error("این لید حذف شده است.");
+  /*
+    گارد لید حذف‌شده — `getLead` عمداً ردیف‌های حذف‌شده را هم برمی‌گرداند (چون
+    بازگردانی به آن نیاز دارد)، پس چک باید اینجا باشد. بدون این، یک درخواست با
+    شناسه‌ی قدیمی (تبِ باز، دکمه‌ی بازگشت مرورگر) روی لید حذف‌شده مدل را صدا
+    می‌زد و از سهمیه‌ی روزانه خرج می‌کرد.
+  */
+  if (lead.deletedAt) throw new Error("این لید حذف شده است.");
 
   /*
     گارد همزمانی — مستقیماً از سهمیه‌ی مدل محافظت می‌کند.
@@ -152,6 +161,8 @@ export async function runLeadStep(
       stopReason: status === "done" ? "ok" : "error",
       errorCode: null,
       createdAt: new Date().toISOString(),
+      deletedAt: null,
+      deletedBatch: null,
     });
   };
 
@@ -420,6 +431,8 @@ export async function runLeadStep(
         rejectedAt: null,
         sentAt: null,
         createdAt: new Date().toISOString(),
+        deletedAt: null,
+        deletedBatch: null,
       };
       await store.createMessage(created);
       await logRun("message-writer", "done", "پیش‌نویس اول نوشته شد؛ منتظر نقد.", draft);
@@ -620,6 +633,8 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
         stopReason: "ok",
         errorCode: null,
         createdAt: new Date().toISOString(),
+        deletedAt: null,
+        deletedBatch: null,
       });
       return output;
     } catch (err) {
@@ -641,6 +656,8 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
         stopReason: "error",
         errorCode: message.slice(0, 80),
         createdAt: new Date().toISOString(),
+        deletedAt: null,
+        deletedBatch: null,
       });
       // گاردریل ۳: توقف بعد از ۲ خطای متوالی
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) stopReason = "CONSECUTIVE_ERRORS";

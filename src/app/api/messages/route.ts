@@ -3,6 +3,7 @@ import { getStore, type MessageStatus } from "@/lib/store";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { checkPolicy } from "@/lib/agents/policy-guard";
 import { recordDecision } from "@/lib/audit";
+import { handleBulkDelete } from "@/lib/delete-route";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +69,9 @@ export async function PATCH(req: NextRequest) {
   const store = getStore();
   const msg = await store.getMessage(id);
   if (!msg) return Response.json({ error: "پیام یافت نشد." }, { status: 404 });
+  // getMessage ردیف حذف‌شده را هم برمی‌گرداند (بازگردانی لازمش دارد)، پس
+  // تأیید/رد/ارسالِ یک پیامِ حذف‌شده باید اینجا جلویش گرفته شود
+  if (msg.deletedAt) return Response.json({ error: "این پیام حذف شده است." }, { status: 404 });
 
   const now = new Date().toISOString();
   // نام کسب‌وکار برای متن خوانای دفترچه‌ی تصمیم (شناسه‌ی UUID به درد مالک نمی‌خورد)
@@ -153,4 +157,15 @@ export async function PATCH(req: NextRequest) {
 
   const updated = await store.getMessage(id);
   return Response.json({ message: updated });
+}
+
+/**
+ * DELETE — حذف نرم انبوه. بدنه: { ids: string[] }
+ * حذف می‌شود: پیام + ردیف‌های دفترچه‌ی تصمیمش.
+ *
+ * ردیف واقعاً پاک نمی‌شود (`deleted_at` می‌گیرد) و از صفحه‌ی سطل زباله قابل
+ * بازگرداندن است. دلیلش در `store/types.ts → SoftDeleteFields`.
+ */
+export async function DELETE(req: NextRequest) {
+  return handleBulkDelete(req, "message");
 }

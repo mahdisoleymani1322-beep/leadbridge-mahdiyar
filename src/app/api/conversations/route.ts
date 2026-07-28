@@ -9,6 +9,7 @@ import type {
 } from "@/lib/store/types";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { recordDecision } from "@/lib/audit";
+import { handleBulkDelete } from "@/lib/delete-route";
 
 export const dynamic = "force-dynamic";
 
@@ -91,6 +92,8 @@ export async function PUT(req: NextRequest) {
     lastMessageAt: conversationState === "replied" ? now : existing?.lastMessageAt ?? null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    deletedAt: null,
+    deletedBatch: null,
   };
   await store.upsertConversation(next);
 
@@ -142,4 +145,15 @@ export async function PUT(req: NextRequest) {
   });
 
   return Response.json({ conversation: next, leadStatus: statusAfter });
+}
+
+/**
+ * DELETE — حذف نرم انبوه. بدنه: { ids: string[] }
+ * حذف می‌شود: رکورد پیگیری.
+ *
+ * ردیف واقعاً پاک نمی‌شود (`deleted_at` می‌گیرد) و از صفحه‌ی سطل زباله قابل
+ * بازگرداندن است. دلیلش در `store/types.ts → SoftDeleteFields`.
+ */
+export async function DELETE(req: NextRequest) {
+  return handleBulkDelete(req, "conversation");
 }

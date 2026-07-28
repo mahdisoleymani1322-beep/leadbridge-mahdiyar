@@ -5,6 +5,7 @@ import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { DEFAULT_CITY, DEFAULT_MARKET_ID, LIMITS, getMarket, isAllMarkets, marketLabel } from "@/lib/config";
 import { SERVICES, ALL_SERVICES_ID } from "@/lib/brand";
 import { recordDecision } from "@/lib/audit";
+import { handleBulkDelete } from "@/lib/delete-route";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,8 @@ export async function POST(req: NextRequest) {
         : LIMITS.dailyMessage,
     status: "active",
     createdAt: new Date().toISOString(),
+    deletedAt: null,
+    deletedBatch: null,
   };
 
   await getStore().createCampaign(campaign);
@@ -61,4 +64,15 @@ export async function POST(req: NextRequest) {
     afterData: { market, city, dailyDiscoveryLimit: campaign.dailyDiscoveryLimit },
   });
   return Response.json({ campaign }, { status: 201 });
+}
+
+/**
+ * DELETE — حذف نرم انبوه. بدنه: { ids: string[] }
+ * حذف می‌شود: کمپین + آبشار کامل: لیدها، پیام‌ها، گفت‌وگوها، اجراهای ایجنت و دفترچه‌ی تصمیمشان.
+ *
+ * ردیف واقعاً پاک نمی‌شود (`deleted_at` می‌گیرد) و از صفحه‌ی سطل زباله قابل
+ * بازگرداندن است. دلیلش در `store/types.ts → SoftDeleteFields`.
+ */
+export async function DELETE(req: NextRequest) {
+  return handleBulkDelete(req, "campaign");
 }

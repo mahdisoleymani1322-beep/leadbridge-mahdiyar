@@ -9,6 +9,53 @@
  * تایپ‌ها camelCase‌اند و ستون‌های دیتابیس snake_case؛ تبدیل در supabase.ts.
  */
 
+/* ── حذف نرم ─────────────────────────────────────────────── */
+
+/**
+ * دو ستونی که هر موجودیتِ قابل‌حذف دارد.
+ *
+ * چرا حذف واقعی انجام نمی‌شود: `leads.dedup_key` یکتاست و `discovery.ts` پیش
+ * از درج هر لید `findLeadByDedupKey` می‌زند. پاک‌کردن ردیف، کلید را آزاد
+ * می‌کند و **کشف بعدی همان کسب‌وکار را دوباره می‌آورد**. با علامت‌گذاری،
+ * کلید اشغال می‌ماند و رستاخیز خودبه‌خود جلویش گرفته می‌شود.
+ *
+ * `deletedBatch` دسته‌ی یک حذف آبشاری را نگه می‌دارد: حذف یک کمپین ده‌ها
+ * ردیف را در شش جدول علامت می‌زند و بازگردانی باید دقیقاً همان دسته را
+ * برگرداند. تکیه بر برابری `deletedAt` شکننده است چون هر آپدیت زمان کمی
+ * متفاوتی می‌گیرد؛ یک uuid که یک‌بار ساخته می‌شود قطعی است.
+ *
+ * جزئیات کامل در `supabase/migrations/006_soft_delete.sql`.
+ */
+export type SoftDeleteFields = {
+  deletedAt: string | null;
+  deletedBatch: string | null;
+};
+
+/** موجودیت‌هایی که مستقیم حذف می‌شوند (بقیه آبشاری حذف می‌شوند) */
+export type TrashKind = "campaign" | "lead" | "message" | "conversation" | "lesson";
+
+/**
+ * نتیجه‌ی یک حذف یا بازگردانی.
+ *
+ * `missing` عمداً جداست: اگر از ۲۰ شناسه ۳ تا پیدا نشود، رابط باید بگوید
+ * «۱۷ حذف شد، ۳ مورد پیدا نشد» نه «انجام شد».
+ */
+export type DeleteResult = {
+  batch: string;
+  counts: Partial<Record<"campaigns" | "leads" | "messages" | "conversations" | "lessons" | "agentRuns" | "audit", number>>;
+  missing: string[];
+};
+
+/** یک دسته‌ی حذف‌شده، آماده‌ی نمایش در صفحه‌ی سطل زباله */
+export type TrashBatch = {
+  batch: string;
+  deletedAt: string;
+  kind: TrashKind;
+  counts: DeleteResult["counts"];
+  /** نام چند مورد اول — تا مالک بفهمد کدام دسته است */
+  labels: string[];
+};
+
 /* ── کمپین ───────────────────────────────────────────────── */
 
 export type CampaignStatus = "active" | "paused";
@@ -33,7 +80,7 @@ export type Campaign = {
   dailyMessageLimit: number;
   status: CampaignStatus;
   createdAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── لید ─────────────────────────────────────────────────── */
 
@@ -129,7 +176,7 @@ export type Lead = {
   dedupKey: string;
   createdAt: string;
   updatedAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── تحلیل لید (خروجی ایجنت Lead Analysis) ────────────────── */
 
@@ -201,7 +248,7 @@ export type Message = {
   rejectedAt: string | null;
   sentAt: string | null;
   createdAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── ثبت اجرای ایجنت/گام (برای نمایش زنده + هزینه) ─────────── */
 
@@ -227,7 +274,7 @@ export type AgentRun = {
   stopReason: string | null;
   errorCode: string | null;
   createdAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── درس (حافظه‌ی خودبهبودی — حفظ‌شده از نسخه‌ی بلاگ) ──────── */
 
@@ -241,7 +288,7 @@ export type Lesson = {
   source: LessonSource;
   active: boolean;
   createdAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── بازخورد انسانی روی لید/پیام ──────────────────────────── */
 
@@ -288,7 +335,7 @@ export type AuditEntry = {
   beforeData: unknown;
   afterData: unknown;
   createdAt: string;
-};
+} & SoftDeleteFields;
 
 /* ── گفت‌وگو / پیگیری لید ──────────────────────────────────── */
 
@@ -320,7 +367,7 @@ export type Conversation = {
   lastMessageAt: string | null;
   createdAt: string;
   updatedAt: string;
-};
+} & SoftDeleteFields;
 
 /** بازه‌ی تاریخ برای کوئری‌های صفحه‌ی CRM (ISO؛ هر دو اختیاری) */
 export type DateRange = { from?: string; to?: string };
@@ -396,4 +443,22 @@ export interface LeadStore {
   upsertConversation(c: Conversation): Promise<void>;
   getConversation(leadId: string): Promise<Conversation | null>;
   listConversations(opts?: DateRange & { leadId?: string; limit?: number }): Promise<Conversation[]>;
+
+  /* ── حذف نرم و سطل زباله ──
+   *
+   * عمداً یک متد عمومی، نه پنج متد جدا (softDeleteLead، softDeleteMessage، …):
+   * منطق آبشار در یک جا می‌ماند و پنج نسخه‌ی کمی متفاوت از آن ساخته نمی‌شود.
+   *
+   * همه‌ی متدهای `list*` بالا ردیف‌های حذف‌شده را کنار می‌گذارند. سه استثنای
+   * عمدی که در پیاده‌سازی کامنت شده‌اند: `findLeadByDedupKey` (مکانیزم
+   * ضدرستاخیز) و `getLead`/`getMessage`/`getCampaign` (بازگردانی به آن‌ها
+   * نیاز دارد — به‌جایش روت‌ها `deletedAt` را چک می‌کنند).
+   */
+
+  /** علامت‌گذاری برای حذف + آبشار وابسته‌ها. یک `batch` برای کل عملیات. */
+  softDelete(kind: TrashKind, ids: string[]): Promise<DeleteResult>;
+  /** برگرداندن کل یک دسته — دقیقاً همان ردیف‌هایی که با هم رفتند */
+  restoreBatch(batch: string): Promise<DeleteResult>;
+  /** دسته‌های حذف‌شده، از جدید به قدیم */
+  listTrash(limit?: number): Promise<TrashBatch[]>;
 }

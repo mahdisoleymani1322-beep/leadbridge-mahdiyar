@@ -316,6 +316,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
       dedupKey,
       createdAt: now,
       updatedAt: now,
+      deletedAt: null,
+      deletedBatch: null,
     };
     // تخمین توان مالی — صفر توکن، از همان داده‌ی عمومی که همین حالا داریم.
     // اینجا محاسبه می‌شود (نه بعداً) تا صف لیدها از همان لحظه‌ی کشف مرتب باشد.
@@ -378,6 +380,8 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
     stopReason: "completed",
     errorCode: null,
     createdAt: new Date().toISOString(),
+    deletedAt: null,
+    deletedBatch: null,
   });
 
   await recordDecision({

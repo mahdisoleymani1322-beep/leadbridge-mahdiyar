@@ -11,6 +11,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   const store = getStore();
   const lead = await store.getLead(params.id);
+  if (lead?.deletedAt) return Response.json({ error: "این لید حذف شده است." }, { status: 404 });
   if (!lead) return Response.json({ error: "لید یافت نشد." }, { status: 404 });
 
   const [analysis, runs] = await Promise.all([
@@ -40,6 +41,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   const store = getStore();
   const lead = await store.getLead(params.id);
+  if (lead?.deletedAt) return Response.json({ error: "این لید حذف شده است." }, { status: 404 });
   if (!lead) return Response.json({ error: "لید یافت نشد." }, { status: 404 });
 
   const note = body.igNote.trim();

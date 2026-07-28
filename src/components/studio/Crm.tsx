@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, StudioLogin, UnauthorizedError, useStudioAuth } from "./auth-client";
+import { DeleteBar, RowCheckbox, SelectAllCheckbox, useBulkSelect } from "./bulk-delete";
 
 /**
  * صفحه‌ی CRM — دفترچه‌ی تصمیم، تاریخچه، قیف تبدیل و پیگیری‌ها.
@@ -73,6 +74,8 @@ type CrmEvent = {
 
 type FollowUp = {
   leadId: string;
+  /** null یعنی هنوز پاسخی ثبت نشده — چیزی برای حذف وجود ندارد */
+  conversationId: string | null;
   businessName: string;
   status: string;
   channel: string | null;
@@ -152,6 +155,9 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   // تنها live region صفحه — همان الگوی داشبورد لید. کلید nonce دارد تا پیام
   // تکراری هم دوباره اعلام شود.
+  const convSel = useBulkSelect();
+  const followHeadingRef = useRef<HTMLHeadingElement | null>(null);
+
   const [status, setStatusState] = useState<{ text: string; n: number }>({ text: "", n: 0 });
   const setStatus = useCallback(
     (text: string) => setStatusState((p) => ({ text, n: p.n + 1 })),
@@ -191,6 +197,12 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** فقط پیگیری‌هایی که واقعاً رکورد پاسخ دارند — بقیه چیزی برای حذف ندارند */
+  const convIds = useMemo(
+    () => (data?.followUps ?? []).map((f) => f.conversationId).filter((x): x is string => !!x),
+    [data]
+  );
 
   const shown = useMemo(
     () => (data ? data.events.filter((e) => kindFilter === "all" || e.kind === kindFilter) : []),
@@ -440,7 +452,12 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       {/* ── پیگیری‌ها ── */}
       {data && (
         <section aria-labelledby="follow-heading">
-          <h2 id="follow-heading" className="mb-2 text-lg font-extrabold text-ink">
+          <h2
+            id="follow-heading"
+            ref={followHeadingRef}
+            tabIndex={-1}
+            className="mb-2 text-lg font-extrabold text-ink"
+          >
             پیگیری‌ها ({fa(data.followUps.length)} لید ارسال‌شده)
           </h2>
           <p className="mb-4 text-xs leading-6 text-ink-muted">
@@ -452,11 +469,49 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
               هنوز پیامی ارسال نشده است. بعد از زدن «ارسال شد» در پنل پیام‌ها، لید اینجا می‌آید.
             </p>
           ) : (
-            <ul className="space-y-4">
-              {data.followUps.map((f) => (
-                <FollowUpCard key={f.leadId} f={f} onSaved={() => void load(false)} say={setStatus} />
-              ))}
-            </ul>
+            <>
+              {/*
+                فقط کارت‌هایی چک‌باکس دارند که واقعاً رکورد پاسخ ثبت‌شده دارند.
+                حذف اینجا یعنی «این پاسخ را اشتباه ثبت کردم»، نه حذف لید — لید
+                در داشبورد حذف می‌شود.
+              */}
+              <div className="mb-4 flex flex-wrap items-center gap-4">
+                <span className="flex items-center gap-2 text-sm text-ink">
+                  <SelectAllCheckbox
+                    id="conv-sel-all"
+                    visibleIds={convIds}
+                    selected={convSel.selected}
+                    onToggleAll={convSel.toggleAll}
+                    label={`انتخاب هر ${fa(convIds.length)} پاسخ ثبت‌شده`}
+                  />
+                  <span aria-hidden="true">انتخاب همه‌ی پاسخ‌های ثبت‌شده</span>
+                </span>
+                <DeleteBar
+                  kind="conversation"
+                  ids={convSel.visibleSelected(convIds)}
+                  endpoint="/api/conversations"
+                  say={setStatus}
+                  onDone={async () => {
+                    convSel.clear();
+                    await load(false);
+                  }}
+                  refocus={() => followHeadingRef.current?.focus()}
+                  extraWarning="خودِ لید و پیامش دست‌نخورده می‌مانند؛ فقط پاسخ ثبت‌شده پاک می‌شود."
+                />
+              </div>
+              <ul className="space-y-4">
+                {data.followUps.map((f) => (
+                  <FollowUpCard
+                    key={f.leadId}
+                    f={f}
+                    onSaved={() => void load(false)}
+                    say={setStatus}
+                    selected={f.conversationId ? convSel.selected.has(f.conversationId) : false}
+                    onToggle={f.conversationId ? () => convSel.toggle(f.conversationId!) : null}
+                  />
+                ))}
+              </ul>
+            </>
           )}
         </section>
       )}
@@ -561,6 +616,8 @@ type LessonRow = {
 function Lessons({ say }: { say: (t: string) => void }) {
   const [rows, setRows] = useState<LessonRow[] | null>(null);
   const [err, setErr] = useState("");
+  const lessonSel = useBulkSelect();
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -590,12 +647,18 @@ function Lessons({ say }: { say: (t: string) => void }) {
 
   return (
     <section aria-labelledby="lessons-heading">
-      <h2 id="lessons-heading" className="mb-2 text-lg font-extrabold text-ink">
+      <h2
+        id="lessons-heading"
+        ref={headingRef}
+        tabIndex={-1}
+        className="mb-2 text-lg font-extrabold text-ink"
+      >
         درس‌های آموخته‌شده {rows ? `(${fa(rows.length)})` : ""}
       </h2>
       <p className="mb-4 text-xs leading-6 text-ink-muted">
         این جمله‌ها به پرامپت نویسنده‌ی پیام تزریق می‌شوند و روی همه‌ی پیام‌های بعدی اثر می‌گذارند.
-        منبعشان یا نمره‌ی پایین منتقد است یا بازخورد خودت. اگر درسی اشتباه بود، غیرفعالش کن.
+        منبعشان یا نمره‌ی پایین منتقد است یا بازخورد خودت. «غیرفعال کن» درس را از پرامپت برمی‌دارد
+        ولی سابقه‌اش می‌ماند؛ «حذف» خودش را از فهرست می‌برد.
       </p>
       <p className={err ? "mb-3 text-sm text-danger" : "sr-only"}>{err}</p>
 
@@ -605,13 +668,45 @@ function Lessons({ say }: { say: (t: string) => void }) {
           با توضیح بزنی، اینجا پر می‌شود.
         </p>
       ) : (
+        <>
+        <div className="mb-3 flex flex-wrap items-center gap-4">
+          <span className="flex items-center gap-2 text-sm text-ink">
+            <SelectAllCheckbox
+              id="lesson-sel-all"
+              visibleIds={(rows ?? []).map((l) => l.id)}
+              selected={lessonSel.selected}
+              onToggleAll={lessonSel.toggleAll}
+              label={`انتخاب هر ${fa((rows ?? []).length)} درس`}
+            />
+            <span aria-hidden="true">انتخاب همه</span>
+          </span>
+          <DeleteBar
+            kind="lesson"
+            ids={lessonSel.visibleSelected((rows ?? []).map((l) => l.id))}
+            endpoint="/api/lessons"
+            say={say}
+            onDone={async () => {
+              lessonSel.clear();
+              await load();
+            }}
+            refocus={() => headingRef.current?.focus()}
+          />
+        </div>
         <ul className="space-y-2">
           {(rows ?? []).map((l) => (
             <li
               key={l.id}
               className="rounded-lg border border-surface-line bg-surface px-4 py-3 shadow-card"
             >
-              <p className="text-sm leading-7 text-ink">{l.lesson}</p>
+              <div className="flex items-start gap-3">
+                <RowCheckbox
+                  id={`lesson-sel-${l.id}`}
+                  checked={lessonSel.selected.has(l.id)}
+                  onToggle={() => lessonSel.toggle(l.id)}
+                  label={`انتخاب درس برای حذف: ${l.lesson.slice(0, 40)}`}
+                />
+                <p className="flex-1 text-sm leading-7 text-ink">{l.lesson}</p>
+              </div>
               <div className="mt-2 flex flex-wrap items-center gap-3">
                 <span className="text-xs text-ink-muted">
                   منبع: {l.source === "critic" ? "منتقد" : "بازخورد تو"} · ایجنت: {l.agent} ·{" "}
@@ -629,6 +724,7 @@ function Lessons({ say }: { say: (t: string) => void }) {
             </li>
           ))}
         </ul>
+        </>
       )}
     </section>
   );
@@ -639,10 +735,15 @@ function FollowUpCard({
   f,
   onSaved,
   say,
+  selected,
+  onToggle,
 }: {
   f: FollowUp;
   onSaved: () => void;
   say: (t: string) => void;
+  selected: boolean;
+  /** null یعنی این کارت پاسخ ثبت‌شده ندارد و چیزی برای حذف نیست */
+  onToggle: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState(f.conversationState ?? "no_reply");
@@ -697,14 +798,24 @@ function FollowUpCard({
         aria-labelledby={headId}
         className="rounded-xl border border-surface-line bg-surface p-5 shadow-card"
       >
-        <h3
-          id={headId}
-          ref={headingRef}
-          tabIndex={-1}
-          className="text-sm font-extrabold text-ink outline-none"
-        >
-          {f.businessName}
-        </h3>
+        <div className="flex items-start gap-3">
+          {onToggle ? (
+            <RowCheckbox
+              id={`conv-sel-${f.conversationId}`}
+              checked={selected}
+              onToggle={onToggle}
+              label={`انتخاب پاسخ ثبت‌شده‌ی ${f.businessName} برای حذف`}
+            />
+          ) : null}
+          <h3
+            id={headId}
+            ref={headingRef}
+            tabIndex={-1}
+            className="flex-1 text-sm font-extrabold text-ink outline-none"
+          >
+            {f.businessName}
+          </h3>
+        </div>
 
         <p className="mt-1 text-xs leading-6 text-ink-muted">
           وضعیت: {f.status}

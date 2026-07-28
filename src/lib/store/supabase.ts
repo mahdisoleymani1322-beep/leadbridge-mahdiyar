@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   AgentRun,
@@ -6,6 +7,7 @@ import type {
   ContactChannels,
   Conversation,
   DateRange,
+  DeleteResult,
   Lead,
   LeadAnalysis,
   LeadFeedback,
@@ -15,6 +17,8 @@ import type {
   Message,
   MessageStatus,
   PortfolioItem,
+  TrashBatch,
+  TrashKind,
 } from "./types";
 
 /**
@@ -64,6 +68,8 @@ function campaignToRow(c: Campaign) {
     daily_message_limit: c.dailyMessageLimit,
     status: c.status,
     created_at: c.createdAt,
+    deleted_at: c.deletedAt,
+    deleted_batch: c.deletedBatch,
   };
 }
 function campaignFromRow(r: any): Campaign {
@@ -77,6 +83,8 @@ function campaignFromRow(r: any): Campaign {
     dailyMessageLimit: r.daily_message_limit,
     status: r.status,
     createdAt: r.created_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -113,6 +121,8 @@ function leadToRow(l: Lead) {
     dedup_key: l.dedupKey,
     created_at: l.createdAt,
     updated_at: l.updatedAt,
+    deleted_at: l.deletedAt,
+    deleted_batch: l.deletedBatch,
   };
 }
 function leadFromRow(r: any): Lead {
@@ -146,6 +156,8 @@ function leadFromRow(r: any): Lead {
     dedupKey: r.dedup_key,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -239,6 +251,8 @@ function messageToRow(m: Message) {
     rejected_at: m.rejectedAt,
     sent_at: m.sentAt,
     created_at: m.createdAt,
+    deleted_at: m.deletedAt,
+    deleted_batch: m.deletedBatch,
   };
 }
 function messageFromRow(r: any): Message {
@@ -259,6 +273,8 @@ function messageFromRow(r: any): Message {
     rejectedAt: r.rejected_at ?? null,
     sentAt: r.sent_at,
     createdAt: r.created_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -280,6 +296,8 @@ function agentRunToRow(r: AgentRun) {
     stop_reason: r.stopReason,
     error_code: r.errorCode,
     created_at: r.createdAt,
+    deleted_at: r.deletedAt,
+    deleted_batch: r.deletedBatch,
   };
 }
 function agentRunFromRow(r: any): AgentRun {
@@ -298,6 +316,8 @@ function agentRunFromRow(r: any): AgentRun {
     stopReason: r.stop_reason,
     errorCode: r.error_code,
     createdAt: r.created_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -309,6 +329,8 @@ function lessonFromRow(r: any): Lesson {
     source: r.source,
     active: r.active,
     createdAt: r.created_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -335,6 +357,8 @@ function auditToRow(a: AuditEntry) {
     before_data: a.beforeData ?? null,
     after_data: a.afterData ?? null,
     created_at: a.createdAt,
+    deleted_at: a.deletedAt,
+    deleted_batch: a.deletedBatch,
   };
 }
 function auditFromRow(r: any): AuditEntry {
@@ -347,6 +371,8 @@ function auditFromRow(r: any): AuditEntry {
     beforeData: r.before_data,
     afterData: r.after_data,
     createdAt: r.created_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -365,6 +391,8 @@ function conversationToRow(c: Conversation) {
     last_message_at: c.lastMessageAt,
     created_at: c.createdAt,
     updated_at: c.updatedAt,
+    deleted_at: c.deletedAt,
+    deleted_batch: c.deletedBatch,
   };
 }
 function conversationFromRow(r: any): Conversation {
@@ -382,6 +410,8 @@ function conversationFromRow(r: any): Conversation {
     lastMessageAt: r.last_message_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    deletedAt: r.deleted_at ?? null,
+    deletedBatch: r.deleted_batch ?? null,
   };
 }
 
@@ -406,6 +436,7 @@ export class SupabaseStore implements LeadStore {
     const { data, error } = await client()
       .from("campaigns")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
     if (error) throw new Error(`خواندن کمپین‌ها ناموفق بود: ${error.message}`);
     return (data ?? []).map(campaignFromRow);
@@ -425,6 +456,17 @@ export class SupabaseStore implements LeadStore {
     const { data } = await client().from("leads").select("*").eq("id", id).maybeSingle();
     return data ? leadFromRow(data) : null;
   }
+  /**
+   * ⚠️ اینجا عمداً `deleted_at is null` **نیست** — و این یک باگ نیست.
+   *
+   * این تنها جایی است که مکانیزم ضدرستاخیز کار می‌کند: `discovery.ts` پیش از
+   * درج هر لید این را صدا می‌زند. اگر لید حذف‌شده را برنگردانیم، `createLead`
+   * روی کلید یکتای `dedup_key` شکست می‌خورد یا — بدتر — همان کسب‌وکارِ
+   * حذف‌شده دوباره وارد فهرست می‌شود. با برگرداندنش، discovery آن را «تکراری»
+   * می‌شمارد و رد می‌کند؛ یعنی حذف واقعاً معنا پیدا می‌کند.
+   *
+   * اگر روزی این را «درست» کردی و فیلتر اضافه کردی، حذف لید بی‌اثر می‌شود.
+   */
   async findLeadByDedupKey(dedupKey: string) {
     const { data } = await client()
       .from("leads")
@@ -440,7 +482,11 @@ export class SupabaseStore implements LeadStore {
     from?: string;
     to?: string;
   }) {
-    let q = client().from("leads").select("*").order("created_at", { ascending: false });
+    let q = client()
+      .from("leads")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
     if (opts?.campaignId) q = q.eq("campaign_id", opts.campaignId);
     if (opts?.status) q = q.eq("status", opts.status);
     if (opts?.from) q = q.gte("created_at", opts.from);
@@ -504,7 +550,11 @@ export class SupabaseStore implements LeadStore {
     return data ? messageFromRow(data) : null;
   }
   async listMessages(opts?: { leadId?: string; status?: MessageStatus; from?: string; to?: string }) {
-    let q = client().from("messages").select("*").order("created_at", { ascending: false });
+    let q = client()
+      .from("messages")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
     if (opts?.leadId) q = q.eq("lead_id", opts.leadId);
     if (opts?.status) q = q.eq("status", opts.status);
     if (opts?.from) q = q.gte("created_at", opts.from);
@@ -523,6 +573,7 @@ export class SupabaseStore implements LeadStore {
     let q = client()
       .from("agent_runs")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(limit);
     if (leadId) q = q.eq("lead_id", leadId);
@@ -539,11 +590,17 @@ export class SupabaseStore implements LeadStore {
       source: lesson.source,
       active: lesson.active,
       created_at: lesson.createdAt,
+      deleted_at: lesson.deletedAt,
+      deleted_batch: lesson.deletedBatch,
     });
     if (error) throw new Error(`ثبت درس ناموفق بود: ${error.message}`);
   }
   async listLessons(opts?: { agent?: string; activeOnly?: boolean }) {
-    let q = client().from("lessons").select("*").order("created_at", { ascending: false });
+    let q = client()
+      .from("lessons")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
     if (opts?.agent) q = q.eq("agent", opts.agent);
     if (opts?.activeOnly) q = q.eq("active", true);
     const { data } = await q;
@@ -577,6 +634,7 @@ export class SupabaseStore implements LeadStore {
     let q = client()
       .from("agent_runs")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(opts.limit ?? 500);
     if (opts.from) q = q.gte("created_at", opts.from);
@@ -596,6 +654,7 @@ export class SupabaseStore implements LeadStore {
     let q = client()
       .from("audit_log")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(opts.limit ?? 500);
     if (opts.from) q = q.gte("created_at", opts.from);
@@ -625,6 +684,7 @@ export class SupabaseStore implements LeadStore {
     let q = client()
       .from("conversations")
       .select("*")
+      .is("deleted_at", null)
       .order("updated_at", { ascending: false })
       .limit(opts?.limit ?? 500);
     if (opts?.leadId) q = q.eq("lead_id", opts.leadId);
@@ -633,5 +693,171 @@ export class SupabaseStore implements LeadStore {
     const { data, error } = await q;
     if (error) throw new Error(`خواندن گفت‌وگوها ناموفق بود: ${error.message}`);
     return (data ?? []).map(conversationFromRow);
+  }
+
+  /* ── حذف نرم، بازگردانی، سطل زباله ────────────────────── */
+
+  async softDelete(kind: TrashKind, ids: string[]): Promise<DeleteResult> {
+    const c = client();
+    const batch = randomUUID();
+    const at = new Date().toISOString();
+    const stamp = { deleted_at: at, deleted_batch: batch };
+    const counts: DeleteResult["counts"] = {};
+
+    // فقط شناسه‌های واقعاً موجود و هنوز حذف‌نشده — تا گزارش «۱۷ حذف شد، ۳ پیدا
+    // نشد» راست باشد و نه صرفاً تعداد ورودی
+    const alive = async (table: string, col: string, values: string[]) => {
+      if (values.length === 0) return [] as string[];
+      const { data } = await c.from(table).select("id").in(col, values).is("deleted_at", null);
+      return (data ?? []).map((r: any) => r.id as string);
+    };
+    const mark = async (table: string, col: string, values: string[]) => {
+      if (values.length === 0) return 0;
+      const { data, error } = await c
+        .from(table)
+        .update(stamp)
+        .in(col, values)
+        .is("deleted_at", null)
+        .select("id");
+      if (error) throw new Error(`حذف از ${table} ناموفق بود: ${error.message}`);
+      return (data ?? []).length;
+    };
+    /** شناسه‌های زنده‌ی یک جدول که به مجموعه‌ای از والدها وصل‌اند */
+    const childIds = async (table: string, col: string, parents: string[]) => {
+      if (parents.length === 0) return [] as string[];
+      const { data } = await c.from(table).select("id").in(col, parents).is("deleted_at", null);
+      return (data ?? []).map((r: any) => r.id as string);
+    };
+
+    if (kind === "campaign") {
+      const campaignIds = await alive("campaigns", "id", ids);
+      // لیدهای کمپین را باید **قبل** از علامت‌زدن پیدا کرد، وگرنه فیلتر
+      // deleted_at آن‌ها را رد می‌کند و آبشار نیمه‌کاره می‌ماند
+      const leadIds = await childIds("leads", "campaign_id", campaignIds);
+      const msgIds = await childIds("messages", "lead_id", leadIds);
+      const convIds = await childIds("conversations", "lead_id", leadIds);
+
+      counts.messages = await mark("messages", "id", msgIds);
+      counts.conversations = await mark("conversations", "id", convIds);
+      counts.leads = await mark("leads", "id", leadIds);
+      counts.campaigns = await mark("campaigns", "id", campaignIds);
+      counts.agentRuns =
+        (await mark("agent_runs", "lead_id", leadIds)) +
+        (await mark("agent_runs", "campaign_id", campaignIds));
+      counts.audit =
+        (await mark("audit_log", "entity_id", [...campaignIds, ...leadIds, ...msgIds]));
+      return { batch, counts, missing: ids.filter((id) => !campaignIds.includes(id)) };
+    }
+
+    if (kind === "lead") {
+      const leadIds = await alive("leads", "id", ids);
+      const msgIds = await childIds("messages", "lead_id", leadIds);
+      const convIds = await childIds("conversations", "lead_id", leadIds);
+
+      counts.messages = await mark("messages", "id", msgIds);
+      counts.conversations = await mark("conversations", "id", convIds);
+      counts.leads = await mark("leads", "id", leadIds);
+      counts.agentRuns = await mark("agent_runs", "lead_id", leadIds);
+      counts.audit = await mark("audit_log", "entity_id", [...leadIds, ...msgIds]);
+      return { batch, counts, missing: ids.filter((id) => !leadIds.includes(id)) };
+    }
+
+    const table = kind === "message" ? "messages" : kind === "conversation" ? "conversations" : "lessons";
+    const key = kind === "message" ? "messages" : kind === "conversation" ? "conversations" : "lessons";
+    const found = await alive(table, "id", ids);
+    counts[key] = await mark(table, "id", found);
+    if (kind === "message") counts.audit = await mark("audit_log", "entity_id", found);
+    return { batch, counts, missing: ids.filter((id) => !found.includes(id)) };
+  }
+
+  async restoreBatch(batch: string): Promise<DeleteResult> {
+    const c = client();
+    const clear = { deleted_at: null, deleted_batch: null };
+    const counts: DeleteResult["counts"] = {};
+    const undo = async (table: string) => {
+      const { data, error } = await c.from(table).update(clear).eq("deleted_batch", batch).select("id");
+      if (error) throw new Error(`بازگردانی ${table} ناموفق بود: ${error.message}`);
+      return (data ?? []).length;
+    };
+    counts.campaigns = await undo("campaigns");
+    counts.leads = await undo("leads");
+    counts.messages = await undo("messages");
+    counts.conversations = await undo("conversations");
+    counts.lessons = await undo("lessons");
+    counts.agentRuns = await undo("agent_runs");
+    counts.audit = await undo("audit_log");
+    return { batch, counts, missing: [] };
+  }
+
+  /**
+   * دسته‌های حذف‌شده — گروه‌بندی در JS انجام می‌شود، نه با کوئری گروهی.
+   * تعداد دسته‌ها در این سیستم ده‌هاست نه ده‌هزارتا، پس ساده‌ترین راهِ درست
+   * بهتر از یک view یا RPC است که باید جدا نگه‌داری شود.
+   */
+  async listTrash(limit = 100): Promise<TrashBatch[]> {
+    const c = client();
+    const groups = new Map<string, TrashBatch>();
+
+    const take = async (
+      table: string,
+      kind: TrashKind,
+      labelCol: string | null,
+      countKey: keyof DeleteResult["counts"],
+      extraCols = ""
+    ) => {
+      const cols = ["id", labelCol, "deleted_at", "deleted_batch", extraCols]
+        .filter(Boolean)
+        .join(", ");
+      const { data } = await c
+        .from(table)
+        .select(cols)
+        .not("deleted_batch", "is", null)
+        .order("deleted_at", { ascending: false })
+        .limit(2000);
+      const rows = (data ?? []) as any[];
+      for (const r of rows) {
+        const b = r.deleted_batch as string;
+        let g = groups.get(b);
+        if (!g) {
+          g = { batch: b, deletedAt: r.deleted_at, kind, counts: {}, labels: [] };
+          groups.set(b, g);
+        }
+        g.counts[countKey] = (g.counts[countKey] ?? 0) + 1;
+        // نوع دسته را والدترین موجودیتِ داخلش تعیین می‌کند: دسته‌ای که کمپین
+        // دارد «حذف کمپین» است، نه «حذف پیام»
+        if (kind === "campaign" || (kind === "lead" && g.kind !== "campaign")) g.kind = kind;
+        if (labelCol && g.labels.length < 4 && r[labelCol]) {
+          g.labels.push(String(r[labelCol]).slice(0, 60));
+        }
+      }
+      return rows;
+    };
+
+    await take("campaigns", "campaign", "name", "campaigns");
+    await take("leads", "lead", "business_name", "leads");
+    await take("conversations", "conversation", "summary", "conversations");
+    await take("lessons", "lesson", "lesson", "lessons");
+    // پیام برچسب خواندنی خودش را ندارد؛ نامش نام همان کسب‌وکار است که روی لید
+    // نشسته. یک کوئری دوم به‌جای join، چون رابطه‌ی FK در PostgREST نام‌گذاری
+    // ضمنی دارد و به تغییر اسکیما حساس است.
+    const msgRows = await take("messages", "message", null, "messages", "lead_id");
+    const needName = [...groups.values()].filter((g) => g.labels.length === 0);
+    if (needName.length > 0 && msgRows.length > 0) {
+      const leadIds = [...new Set(msgRows.map((r) => r.lead_id).filter(Boolean))];
+      const { data: leadRows } = await c
+        .from("leads")
+        .select("id, business_name")
+        .in("id", leadIds as string[]);
+      const nameOf = new Map((leadRows ?? []).map((r: any) => [r.id, r.business_name]));
+      for (const r of msgRows) {
+        const g = groups.get(r.deleted_batch);
+        const name = nameOf.get(r.lead_id);
+        if (g && name && g.labels.length < 4 && !g.labels.includes(name)) g.labels.push(name);
+      }
+    }
+
+    return [...groups.values()]
+      .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt))
+      .slice(0, limit);
   }
 }
