@@ -23,7 +23,42 @@ function digits(s: string): string {
   return s.replace(/\D+/g, "");
 }
 
-async function fetchHtml(url: string, ms = 6000): Promise<string | null> {
+/**
+ * URL را برای fetch آماده می‌کند و مقصدهای نامناسب را رد می‌کند.
+ *
+ * دو مشکل واقعی را حل می‌کند:
+ * ۱. **بدون پروتکل**: تگ website در OSM اغلب «www.example.com» است. `fetch`
+ *    روی چنین رشته‌ای استثنا می‌داد، استثنا بی‌صدا گرفته می‌شد و نتیجه این بود
+ *    که کانال‌های آن کسب‌وکار **هرگز استخراج نمی‌شدند**. در داده‌ی زنده دو لید
+ *    دقیقاً همین وضع را داشتند (سایپا امداد و مرکز بهداشت ارتباطات زیرساخت).
+ * ۲. **مقصد داخلی**: آدرس سایت از داده‌ی بیرونی (OSM/Tavily) می‌آید و
+ *    `redirect: follow` داریم؛ فقط http/https و هاست غیرمحلی مجاز است.
+ */
+function normalizeUrl(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : `https://${s}`);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const h = u.hostname.toLowerCase();
+    if (
+      h === "localhost" ||
+      h.endsWith(".local") ||
+      /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+      h === "[::1]"
+    ) {
+      return null;
+    }
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchHtml(rawUrl: string, ms = 6000): Promise<string | null> {
+  const url = normalizeUrl(rawUrl);
+  if (!url) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -109,6 +144,11 @@ export type ExtractInput = {
   instagramHandle?: string | null;
   /** کانال‌های آماده از خود منبع (تگ‌های contact:* در OSM) */
   seedChannels?: Partial<ContactChannels>;
+  /**
+   * از خواندن HTML سایت صرف‌نظر کن (وقتی بودجه‌ی زمانی کشف رو به اتمام است).
+   * کانال‌های پایه از منبع همچنان ثبت می‌شوند.
+   */
+  skipHtml?: boolean;
   priority: ChannelKey[];
 };
 
@@ -128,12 +168,15 @@ export async function extractContactChannels(input: ExtractInput): Promise<Extra
   if (input.phone && !channels.phone) channels.phone = input.phone.replace(/[()\s-]/g, "");
   if (input.instagramHandle && !channels.instagram) channels.instagram = input.instagramHandle;
 
-  if (input.website) {
-    const home = await fetchHtml(input.website);
+  // پایه‌ی مسیرهای نسبی باید همان URL نرمال‌شده باشد، وگرنه «/contact» روی
+  // ورودی بدون پروتکل به آدرس غلط حل می‌شود.
+  const siteUrl = input.website && !input.skipHtml ? normalizeUrl(input.website) : null;
+  if (siteUrl) {
+    const home = await fetchHtml(siteUrl);
     if (home) {
       extractFromHtml(home, channels);
-      const contactUrl = findContactPath(home, input.website);
-      if (contactUrl && contactUrl !== input.website) {
+      const contactUrl = findContactPath(home, siteUrl);
+      if (contactUrl && contactUrl !== siteUrl) {
         const contactHtml = await fetchHtml(contactUrl);
         if (contactHtml) {
           extractFromHtml(contactHtml, channels);
@@ -144,7 +187,7 @@ export async function extractContactChannels(input: ExtractInput): Promise<Extra
         }
       }
       if (!channels.siteForm && /<form[\s>]/i.test(home)) {
-        channels.siteForm = input.website;
+        channels.siteForm = siteUrl;
       }
     }
   }

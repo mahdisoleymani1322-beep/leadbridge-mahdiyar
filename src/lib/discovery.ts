@@ -47,8 +47,23 @@ export type DiscoverySummary = {
   leadIds: string[];
 };
 
+/**
+ * بودجه‌ی زمانی کل کشف.
+ *
+ * تابع Vercel سقف ۶۰ ثانیه دارد و کشف سه بخش کند دارد که پشت‌سرهم اجرا
+ * می‌شوند: Overpass (تا ۳۰ ثانیه)، جست‌وجوی وب (تا ۸ × ۱۵ ثانیه) و خواندن
+ * سایت‌ها (تا ۲ صفحه × ۶ ثانیه برای هر لید). جمعشان به‌راحتی از ۶۰ رد می‌شود.
+ *
+ * با این بودجه، هر بخش قبل از شروعِ کارِ تازه مهلت را چک می‌کند و کشف با
+ * نتیجه‌ی **ناقص ولی ذخیره‌شده** تمام می‌شود، نه با تایم‌اوت و از دست رفتن
+ * همه‌چیز. ۴۵ ثانیه انتخاب شده تا برای درج در دیتابیس و ثبت لاگ جا بماند.
+ */
+const DISCOVERY_BUDGET_MS = 45_000;
+
 export async function runDiscovery(campaignId: string): Promise<DiscoverySummary> {
   const started = Date.now();
+  const deadlineAt = started + DISCOVERY_BUDGET_MS;
+  const timeLeft = () => deadlineAt - Date.now();
   const store = getStore();
 
   const campaign = await store.getCampaign(campaignId);
@@ -100,11 +115,15 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
 
   // منبع مکمل — جست‌وجوی وب، **در همان دکمه‌ی کشف** (نه دکمه‌ی جدا).
   // فقط اگر TAVILY_API_KEY تنظیم شده باشد؛ نتایج با OSM ترکیب می‌شوند.
-  if (isWebSearchConfigured()) {
+  // جست‌وجوی وب فقط اگر هنوز وقت معناداری مانده باشد (وگرنه از استخراج
+  // کانال‌های لیدهایی که همین حالا داریم می‌زند، که ارزشمندتر است)
+  if (isWebSearchConfigured() && timeLeft() > 12_000) {
     const web = await discoverViaWebSearch(
       queryTermsFor(campaign.market),
       campaign.city,
-      Math.min(limit, WEB_SEARCH.maxLeadsPerRun)
+      Math.min(limit, WEB_SEARCH.maxLeadsPerRun),
+      // ۱۰ ثانیه برای استخراج کانال‌ها و درج کنار می‌گذاریم
+      deadlineAt - 10_000
     );
     summary.webSearches = web.searchesUsed;
     const seenIds = new Set(discovered.map((p) => p.placeId));
@@ -146,11 +165,16 @@ export async function runDiscovery(campaignId: string): Promise<DiscoverySummary
 
   const CONCURRENCY = 5;
   for (let i = 0; i < target.length; i += CONCURRENCY) {
+    // اگر وقت تمام شد، بقیه‌ی لیدها **بدون** خواندن سایتشان پردازش می‌شوند:
+    // کانال‌های پایه (تلفن/ایمیل از تگ‌های OSM) را دارند، فقط غنی‌سازی از
+    // صفحه‌ی وب انجام نمی‌شود. لید ناقص خیلی بهتر از لید ازدست‌رفته است.
+    const skipHtml = timeLeft() < 8_000;
     const batch = target.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
       batch.map(async (p): Promise<Prepared | null> => {
         try {
           const extracted = await extractContactChannels({
+            skipHtml,
             website: p.website,
             phone: p.phone,
             instagramHandle: p.instagramHandle ?? null,

@@ -324,7 +324,17 @@ export type WebSearchResult = {
 export async function discoverViaWebSearch(
   queryTerms: string[],
   city: string,
-  limit: number
+  limit: number,
+  /**
+   * مهلت مطلق (Date.now میلی‌ثانیه). وقتی گذشت، حلقه بدون شروع جست‌وجوی تازه
+   * تمام می‌شود و هرچه تا اینجا جمع شده برمی‌گردد.
+   *
+   * چرا لازم است: تابع Vercel سقف ۶۰ ثانیه دارد. ۸ جست‌وجو × ۱۵ ثانیه تایم‌اوت
+   * در بدترین حالت ۱۲۰ ثانیه است و کل کشف را با FUNCTION_INVOCATION_TIMEOUT
+   * می‌ترکاند — همان کلاس باگی که قبلاً تولید پیام را از کار انداخت. نتیجه‌ی
+   * ناقص خیلی بهتر از شکست کامل و از دست رفتن همه‌ی لیدهای پیداشده است.
+   */
+  deadlineAt?: number
 ): Promise<WebSearchResult> {
   if (!isWebSearchConfigured() || queryTerms.length === 0) {
     return { places: [], searchesUsed: 0 };
@@ -343,6 +353,8 @@ export async function discoverViaWebSearch(
   for (const { term, pattern } of plan) {
     if (searchesUsed >= WEB_SEARCH.maxSearchesPerRun) break;
     if (out.length >= leadCap) break;
+    // مهلت را قبل از شروع جست‌وجوی بعدی چک کن، نه وسطش
+    if (deadlineAt && Date.now() >= deadlineAt) break;
 
     searchesUsed++;
     const results = await tavilySearch(pattern(term, city), WEB_SEARCH.maxResultsPerSearch);

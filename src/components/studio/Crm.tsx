@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiFetch, StudioLogin, UnauthorizedError, useStudioAuth } from "./auth-client";
 
 /**
  * صفحه‌ی CRM — دفترچه‌ی تصمیم، تاریخچه، قیف تبدیل و پیگیری‌ها.
@@ -130,6 +131,7 @@ const STATE_LABELS: Record<string, string> = {
 };
 
 export function Crm() {
+  const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
   const [from, setFrom] = useState(daysAgo(30));
   const [to, setTo] = useState(ymd(new Date()));
   const [campaignId, setCampaignId] = useState("");
@@ -153,9 +155,9 @@ export function Crm() {
       try {
         const q = new URLSearchParams({ from: startIso(from), to: endIso(to) });
         if (campaignId) q.set("campaignId", campaignId);
-        const res = await fetch(`/api/crm?${q}`, { cache: "no-store" });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error ?? "خواندن داده ناموفق بود.");
+        // قبلاً fetch خام بود و هدر رمز نمی‌فرستاد؛ یعنی لحظه‌ای که
+        // STUDIO_PASSWORD تنظیم می‌شد، کل صفحه‌ی CRM با ۴۰۱ می‌مرد.
+        const json = await apiFetch<CrmData>(`/api/crm?${q}`);
         setData(json);
         if (announce) {
           setStatus(
@@ -165,18 +167,31 @@ export function Crm() {
           );
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        // ۴۰۱ یعنی «هنوز وارد نشده‌ای»، نه خطای صفحه
+        if (e instanceof UnauthorizedError) onUnauthorized();
+        else setError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(false);
       }
     },
-    [from, to, campaignId, setStatus]
+    [from, to, campaignId, setStatus, onUnauthorized]
   );
 
   useEffect(() => {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  if (ready && needsLogin) {
+    return (
+      <StudioLogin
+        onSaved={() => {
+          onLoggedIn();
+          void load(false);
+        }}
+      />
+    );
+  }
 
   const shown = useMemo(
     () => (data ? data.events.filter((e) => kindFilter === "all" || e.kind === kindFilter) : []),
@@ -553,9 +568,8 @@ function FollowUpCard({
     setBusy(true);
     setErr("");
     try {
-      const res = await fetch("/api/conversations", {
+      const json = await apiFetch<{ leadStatus: string }>("/api/conversations", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           leadId: f.leadId,
           conversationState: state,
@@ -567,8 +581,6 @@ function FollowUpCard({
           converted,
         }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? "ثبت ناموفق بود.");
       say(
         converted
           ? `«${f.businessName}» به‌عنوان تبدیل‌شده ثبت شد.`

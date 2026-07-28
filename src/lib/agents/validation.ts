@@ -35,10 +35,68 @@ function hasAnyChannel(c: ContactChannels): boolean {
 }
 
 /**
+ * هاست‌هایی که **هویت یک کسب‌وکار خاص نیستند** و نباید کلید یکتاسازی بسازند.
+ *
+ * چرا حیاتی است: در داده‌ی واقعی، دو کسب‌وکار کاملاً بی‌ربط («شیرینی مجید» و
+ * «پوشاک گِس») هر دو `instagram.com` را در فیلد website داشتند — چون تگ OSM
+ * آن‌ها لینک پیج بود نه سایت. اگر دامنه بدون این استثنا کلید می‌شد، آن دو در
+ * هم ادغام می‌شدند و یکی‌شان بی‌صدا حذف می‌شد.
+ */
+const NON_IDENTITY_HOSTS = [
+  "instagram.com",
+  "facebook.com",
+  "t.me",
+  "telegram.me",
+  "wa.me",
+  "linkedin.com",
+  "aparat.com",
+  "youtube.com",
+  "twitter.com",
+  "x.com",
+  "blogfa.com",
+  "blog.ir",
+  "mihanblog.com",
+  "persianblog.ir",
+  "wordpress.com",
+  "blogspot.com",
+  "wixsite.com",
+  "sites.google.com",
+];
+
+/**
+ * دامنه‌ی اصلی سایت را نرمال می‌کند (بدون پروتکل، بدون www، حروف کوچک).
+ * اگر هاست هویت‌بخش نبود، null برمی‌گرداند.
+ */
+export function identityHost(website: string | null | undefined): string | null {
+  if (!website) return null;
+  const raw = website.trim();
+  if (!raw) return null;
+  try {
+    // OSM گاهی سایت را بدون پروتکل ذخیره می‌کند («www.example.com»)
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    if (!host || !host.includes(".")) return null;
+    if (NON_IDENTITY_HOSTS.some((h) => host === h || host.endsWith("." + h))) return null;
+    return host;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * کلید یکتاسازی برای حذف تکراری قطعی.
- * اولویت: place_id > تلفن نرمال‌شده > نام+شهر (پایین‌ترین اعتماد).
+ * اولویت: دامنه‌ی اختصاصی > place_id > تلفن نرمال‌شده > نام+شهر.
+ *
+ * **چرا دامنه بالاتر از place_id است:** کلیدهای place_id منبع‌محورند
+ * (`osm:node/…` در برابر `web:site:…` در برابر خالی برای لید دستی)، پس یک
+ * کسب‌وکار که از دو منبع کشف شود دو کلید متفاوت می‌گیرد و دو ردیف می‌سازد.
+ * این دقیقاً در داده‌ی واقعی اتفاق افتاد: «کلینیک زیبایی ایرانیان» دو بار ثبت
+ * شده بود — یکی از جست‌وجوی وب و یکی دستی — هر دو با `iranianclinic.com`.
+ * دامنه‌ی اختصاصی تنها شناسه‌ای است که بین منابع مشترک می‌ماند.
  */
 export function computeDedupKey(c: LeadCandidate): string {
+  const host = identityHost(c.website);
+  if (host) return `site:${host}`;
   if (c.placeId) return `place:${c.placeId}`;
   const phone = c.phone ? digits(c.phone) : c.channels.phone ? digits(c.channels.phone) : "";
   if (phone.length >= 7) return `phone:${phone}`;

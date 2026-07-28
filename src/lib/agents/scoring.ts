@@ -1,5 +1,11 @@
 import "server-only";
-import { SCORING_WEIGHTS, SCORE_THRESHOLDS, type ScoringCriterion } from "@/lib/config";
+import {
+  SCORING_WEIGHTS,
+  SCORE_THRESHOLDS,
+  getMarket,
+  isAllMarkets,
+  type ScoringCriterion,
+} from "@/lib/config";
 import type { Lead } from "@/lib/store";
 import type { LeadAnalysisOutput } from "./types";
 
@@ -64,6 +70,41 @@ function portfolioFit(lead: Lead): number {
   return 0.5; // پیش‌فرض: تناسب متوسط (خدمات مهدیار عمومی‌اند)
 }
 
+/**
+ * تطابق واقعی لید با بازار هدفِ کمپین.
+ *
+ * ⚠️ این معیار قبلاً `lead.campaignId ? 1 : 0.6` بود — یعنی هر لیدی که به یک
+ * کمپین وصل بود (که همه‌شان هستند) ۲۰ امتیاز رایگان می‌گرفت و معیار عملاً
+ * هیچ‌چیز را نمی‌سنجید. اثرش در داده‌ی واقعی دیده شد: ۲۹ لید امتیازدار با
+ * دامنه‌ی فشرده‌ی ۶۲ تا ۸۳، **۸۶٪ PASS و صفر REJECT**. یعنی امتیازدهی که کل
+ * وظیفه‌اش غربال پیش از خرج سهمیه است، چیزی را غربال نمی‌کرد.
+ *
+ * حالا صنعت/نوع لید با تگ‌ها و عبارت‌های همان بازار مقایسه می‌شود.
+ *
+ * حالت «همه‌ی بازارها» عمداً ۱ می‌گیرد: وقتی کمپین همه را هدف گرفته، مفهوم
+ * «ناهماهنگ با بازار» وجود ندارد و جریمه‌کردنش بی‌معناست.
+ */
+function marketFit(lead: Lead, marketId: string | null): number {
+  if (!lead.campaignId) return 0.6;
+  if (!marketId || isAllMarkets(marketId)) return 1;
+  const market = getMarket(marketId);
+  if (!market) return 0.8; // بازار ناشناخته — نه پاداش، نه جریمه‌ی سنگین
+
+  const hay = `${lead.industry ?? ""} ${lead.businessName}`.toLowerCase();
+  if (!hay.trim()) return 0.5;
+
+  // تگ OSM (مثل «amenity=clinic») → بخش مقدار، که همان چیزی است که در
+  // industry ذخیره می‌شود («clinic»).
+  const tagValues = market.osmTags.map((t) => (t.includes("=") ? t.split("=")[1] : t).toLowerCase());
+  const terms = [...market.queryTerms, ...(market.officeTerms ?? [])].map((t) => t.toLowerCase());
+
+  if (tagValues.some((v) => v && hay.includes(v))) return 1;
+  // عبارت‌های فارسی چندکلمه‌ای‌اند؛ تطابق واژه‌به‌واژه واقع‌بینانه‌تر است
+  const words = terms.flatMap((t) => t.split(/\s+/)).filter((w) => w.length > 2);
+  if (words.some((w) => hay.includes(w))) return 0.85;
+  return 0.4; // در دامنه‌ی کمپین هست ولی نشانه‌ای از تطابق با بازار نیست
+}
+
 /** ریسک پایین: عدم DNC، وضعیت سالم، نبود پرچم ریسک در تحلیل */
 function lowRisk(lead: Lead, analysis: LeadAnalysisOutput | null): number {
   if (lead.doNotContact) return 0;
@@ -76,11 +117,15 @@ function lowRisk(lead: Lead, analysis: LeadAnalysisOutput | null): number {
 /**
  * امتیاز لید را می‌سنجد.
  * @param analysis خروجی ایجنت تحلیل (اگر هنوز تحلیل نشده، null → امتیاز محافظه‌کارانه)
+ * @param marketId بازار هدف کمپین — برای سنجش واقعی marketFit
  */
-export function scoreLead(lead: Lead, analysis: LeadAnalysisOutput | null): ScoreResult {
+export function scoreLead(
+  lead: Lead,
+  analysis: LeadAnalysisOutput | null,
+  marketId: string | null = null
+): ScoreResult {
   const criteria: Record<ScoringCriterion, number> = {
-    // تطابق بازار: اگر به کمپینی با بازار مشخص وصل است، تطابق دارد
-    marketFit: lead.campaignId ? 1 : 0.6,
+    marketFit: marketFit(lead, marketId),
     // نیاز قابل مشاهده: از تحلیل (شواهد + قدرت درد)
     visibleNeed: analysis
       ? Math.min((analysis.evidence.length / 2) * 0.5 + analysis.confidence * 0.5, 1)

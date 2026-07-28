@@ -27,6 +27,7 @@ import {
   MESSAGE_SIGNATURE,
   withSignature,
 } from "@/lib/brand";
+import { apiFetch, StudioLogin, UnauthorizedError, useStudioAuth } from "./auth-client";
 
 /** ارقام فارسی در متن کاربرپسند (طبق قرارداد پروژه) */
 const fa = (n: number | string) => new Intl.NumberFormat("fa-IR").format(Number(n));
@@ -68,25 +69,12 @@ const CRITERION_LABELS: Record<ScoringCriterion, string> = {
   lowRisk: "ریسک پایین",
 };
 
-/* ── کمکی fetch با هدر رمز استودیو (در صورت وجود) ─────────── */
+/* ── کمکی fetch با هدر رمز استودیو ────────────────────────── */
 
-function authHeaders(): HeadersInit {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (typeof window !== "undefined") {
-    const pw = window.localStorage.getItem("studioPassword");
-    if (pw) h["x-studio-password"] = pw;
-  }
-  return h;
-}
-
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...(init?.headers ?? {}) } });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `خطای ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
+// منطق رمز و فرم ورود در auth-client.tsx مشترک است (بین /studio و /studio/crm).
+// تا پیش از این، رمز فقط از localStorage خوانده می‌شد و هیچ راهی برای واردکردنش
+// نبود — یعنی تنظیم‌کردن STUDIO_PASSWORD عملاً مالک را از داشبورد بیرون می‌کرد.
+const api = apiFetch;
 
 /* ── برچسب کانال‌های ارتباط ───────────────────────────────── */
 
@@ -809,6 +797,7 @@ function LeadsTable({
 /* ── کامپوننت اصلی ────────────────────────────────────────── */
 
 export function Studio() {
+  const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
@@ -918,24 +907,39 @@ export function Studio() {
     setMessages(messages);
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      setBusy("load");
-      setError("");
-      try {
-        const cs = await loadCampaigns();
-        if (cs[0]) {
-          setSelectedId(cs[0].id);
-          await loadLeads(cs[0].id);
-          await loadMessages(cs[0].id);
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setBusy(null);
+  const bootstrap = useCallback(async () => {
+    setBusy("load");
+    setError("");
+    try {
+      const cs = await loadCampaigns();
+      if (cs[0]) {
+        setSelectedId(cs[0].id);
+        await loadLeads(cs[0].id);
+        await loadMessages(cs[0].id);
       }
-    })();
-  }, [loadCampaigns, loadLeads, loadMessages]);
+    } catch (e) {
+      // ۴۰۱ خطا نیست، یعنی «هنوز وارد نشده‌ای» — فرم ورود جای پیام خطا می‌آید
+      if (e instanceof UnauthorizedError) onUnauthorized();
+      else setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [loadCampaigns, loadLeads, loadMessages, onUnauthorized]);
+
+  useEffect(() => {
+    void bootstrap();
+  }, [bootstrap]);
+
+  if (ready && needsLogin) {
+    return (
+      <StudioLogin
+        onSaved={() => {
+          onLoggedIn();
+          void bootstrap();
+        }}
+      />
+    );
+  }
 
   async function selectCampaign(id: string) {
     setSelectedId(id);

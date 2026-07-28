@@ -87,6 +87,30 @@ export async function runLeadStep(
   const lead = await store.getLead(leadId);
   if (!lead) throw new Error("لید یافت نشد.");
 
+  /*
+    گارد همزمانی — مستقیماً از سهمیه‌ی مدل محافظت می‌کند.
+
+    بدون این، دو درخواست همزمان روی یک لید (دو کلیک سریع، یا همپوشانی حلقه‌ی
+    گروهی با دکمه‌ی تک‌ردیفی) هر دو وضعیت NEW را می‌خوانند، هر دو ANALYZING
+    می‌کنند و **هر دو مدل را صدا می‌زنند** — یعنی دو فراخوان از سهمیه‌ی ۵۰
+    درخواستِ روزانه برای یک لید.
+
+    ANALYZING یک وضعیت گذراست: اگر لید آنجا مانده باشد یعنی یا همین الان در
+    حال پردازش است یا اجرای قبلی وسط کار قطع شده. در هر دو حالت، شروع دوباره
+    اشتباه است. دکمه‌ی «تحلیل لید» با force این گارد را دور می‌زند تا لید
+    واقعاً گیرکرده دستی آزاد شود.
+  */
+  if (lead.status === "ANALYZING" && !opts.force) {
+    return {
+      leadId,
+      ran: "none",
+      status: lead.status,
+      score: lead.score,
+      done: true,
+      summary: `«${lead.businessName}» همین حالا در حال تحلیل است؛ برای جلوگیری از خرج دوباره‌ی سهمیه رد شد.`,
+    };
+  }
+
   const existing = await store.getAnalysis(leadId);
   const started = Date.now();
 
@@ -207,8 +231,11 @@ export async function runLeadStep(
     });
     await logRun("lead-analysis", "done", `درد: ${analysis.painPoint.slice(0, 80)}…`, analysis);
 
-    // امتیازدهی قطعی (صفر توکن) — بلافاصله بعد از تحلیل
-    const sc = scoreLead(lead, analysis);
+    // امتیازدهی قطعی (صفر توکن) — بلافاصله بعد از تحلیل.
+    // بازار کمپین لازم است تا marketFit واقعاً تطابق را بسنجد، نه اینکه به
+    // همه ۲۰ امتیاز رایگان بدهد.
+    const campaign = lead.campaignId ? await store.getCampaign(lead.campaignId) : null;
+    const sc = scoreLead(lead, analysis, campaign?.market ?? null);
     const nextStatus: LeadStatus =
       sc.decision === "PASS" ? "SCORED" : sc.decision === "NURTURE" ? "NURTURE" : "REJECTED";
     await store.updateLead(leadId, {
@@ -638,7 +665,8 @@ export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
   await store.upsertAnalysis(analysisRow);
 
   // ── ۲. امتیازدهی (سرویس قطعی — صفر توکن) ──
-  const scoreResult: ScoreResult = scoreLead(lead, analysis);
+  const pipelineCampaign = lead.campaignId ? await store.getCampaign(lead.campaignId) : null;
+  const scoreResult: ScoreResult = scoreLead(lead, analysis, pipelineCampaign?.market ?? null);
   await setStatus("SCORED", { score: scoreResult.score, confidence: analysis.confidence });
   steps.push({ agent: "scoring", status: "done", summary: scoreResult.reason });
 
