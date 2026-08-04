@@ -2,6 +2,7 @@ import "server-only";
 import { generateText } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { z } from "zod";
+import { AI_LIMITS } from "@/lib/config";
 
 /**
  * هسته‌ی AI — همان الگوی فاز ۲: همه‌ی مدل‌ها از طریق OpenRouter.
@@ -88,6 +89,39 @@ function isRetriableModelError(err: unknown): boolean {
   return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout/i.test(msg);
 }
 
+/**
+ * بودجه‌ی درخواستِ یک فراخوان **منطقی** ایجنت.
+ *
+ * چرا لازم شد: تا امروز دو لایه‌ی تلاش مجدد وجود داشت که **در هم ضرب
+ * می‌شدند** و هیچ‌کدام از دیگری خبر نداشت — زنجیره‌ی ۳ مدل در `runAgentText`
+ * ضربدر حلقه‌ی ۲ تلاشی JSON در `runAgentJSON` = تا **۶ درخواست upstream برای
+ * یک فراخوان منطقی**. روی لیدی که یک دور بازنویسی بخورد (۹ فراخوان ایجنت)،
+ * سقف نظری ۵۴ درخواست می‌شد؛ یعنی **یک لید می‌توانست کل سهمیه‌ی روز را
+ * بسوزاند**. این تنها جای سیستم بود که هیچ سقفی نداشت، در حالی که همه‌جای
+ * دیگر با گاردهای سفت بسته شده بود.
+ *
+ * بودجه یک‌بار در بالاترین سطح ساخته و بین لایه‌ها به اشتراک گذاشته می‌شود،
+ * پس سقف روی **کل** فراخوان اعمال می‌شود نه روی هر لایه جدا.
+ */
+export type CallBudget = {
+  /** چند درخواست upstream تا الان مصرف شده */
+  used: number;
+  /** سقف کل */
+  max: number;
+  /**
+   * آخرین مدلی که واقعاً جواب داد.
+   *
+   * تلاش دوم JSON از همین‌جا شروع می‌کند، نه از اول زنجیره. قبلاً `runAgentJSON`
+   * برای هر تلاش `runAgentText` تازه صدا می‌زد و زنجیره از مدل اول شروع می‌شد —
+   * یعنی مدلی که همین چند ثانیه پیش ۴۲۹ داده بود دوباره امتحان می‌شد.
+   */
+  lastGoodModel: string | null;
+};
+
+export function newCallBudget(max = AI_LIMITS.maxUpstreamRequestsPerCall): CallBudget {
+  return { used: 0, max, lastGoodModel: null };
+}
+
 export type AgentCallOptions = {
   /** نام ایجنت — فقط برای پیام‌های خطای خواناتر */
   agent: string;
@@ -96,29 +130,56 @@ export type AgentCallOptions = {
   model?: string;
   temperature?: number;
   maxOutputTokens?: number;
+  /**
+   * بودجه‌ی مشترک. اگر داده نشود، یک بودجه‌ی تازه ساخته می‌شود — یعنی فراخوان
+   * تک‌مرحله‌ای هم سقف دارد.
+   */
+  budget?: CallBudget;
 };
 
 /**
  * اجرای یک ایجنت با خروجی متنی آزاد.
- * اگر مدل اصلی rate-limit/در دسترس نبود، مدل‌های جایگزین امتحان می‌شوند
- * (گاردریل: هر مدل فقط یک بار؛ خطای غیرقابل‌جبران بلافاصله پرتاب می‌شود).
+ *
+ * زنجیره‌ی مدل‌ها فقط تا جایی جلو می‌رود که بودجه اجازه دهد. خطای
+ * غیرقابل‌جبران (مثل کلید نامعتبر) بلافاصله پرتاب می‌شود و بودجه را هدر نمی‌دهد.
  */
 export async function runAgentText(opts: AgentCallOptions): Promise<string> {
   const openrouter = getOpenRouter();
   const primary = opts.model ?? defaultModel();
-  const chain = [primary, ...modelFallbacks().filter((m) => m !== primary)];
+  const budget = opts.budget ?? newCallBudget();
+
+  /*
+    ترتیب زنجیره: اگر تلاش قبلی روی مدلی موفق بوده، از همان شروع کن.
+    بازگشت به ابتدای زنجیره یعنی دوباره کوبیدن به مدلی که تازه رد کرده است.
+  */
+  const base = [primary, ...modelFallbacks().filter((m) => m !== primary)];
+  const chain =
+    budget.lastGoodModel && base.includes(budget.lastGoodModel)
+      ? [budget.lastGoodModel, ...base.filter((m) => m !== budget.lastGoodModel)]
+      : base;
 
   let lastError: unknown = null;
   for (const model of chain) {
+    if (budget.used >= budget.max) {
+      lastError = new Error(
+        `سقف ${budget.max} درخواست برای این فراخوان پر شد؛ برای صرفه‌جویی سهمیه متوقف شد.`
+      );
+      break;
+    }
+    budget.used++;
     try {
       const result = await generateText({
         model: openrouter(model),
         system: opts.system,
         prompt: opts.prompt,
         temperature: opts.temperature ?? 0.7,
-        maxOutputTokens: opts.maxOutputTokens ?? 2000,
+        maxOutputTokens: opts.maxOutputTokens ?? AI_LIMITS.defaultMaxOutputTokens,
       });
-      if (result.text.trim()) return result.text;
+      if (result.text.trim()) {
+        budget.lastGoodModel = model;
+        return result.text;
+      }
+      // پاسخ خالی: مدل بعدی می‌ارزد، ولی مثل هر درخواست دیگری از بودجه کم شد
       lastError = new Error("پاسخ خالی بود");
     } catch (err) {
       lastError = err;
@@ -165,14 +226,22 @@ export async function runAgentJSON<T>(opts: AgentJSONOptions<T>): Promise<T> {
     `خروجی تو باید «فقط» یک شیء JSON معتبر باشد؛ بدون هیچ توضیح، مقدمه یا \`\`\`.\n` +
     `دقیقاً با این ساختار:\n${opts.shapeHint}`;
 
+  // بودجه یک‌بار ساخته می‌شود و بین همه‌ی تلاش‌ها مشترک است — وگرنه سقف روی هر
+  // تلاش جدا اعمال می‌شد و دوباره ضرب می‌شدند.
+  const budget = opts.budget ?? newCallBudget();
+
   let lastError = "";
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let attempts = 0;
+  for (let attempt = 1; attempt <= AI_LIMITS.maxJsonAttempts; attempt++) {
+    if (budget.used >= budget.max) break;
+    attempts = attempt;
     const retryNote = lastError
       ? `\n\nتلاش قبلی‌ات JSON نامعتبری داشت. خطا: ${lastError}\nاین بار فقط JSON معتبر مطابق ساختار بده.`
       : "";
 
     const text = await runAgentText({
       ...opts,
+      budget,
       prompt: opts.prompt + jsonInstruction + retryNote,
       // خروجی ساخت‌یافته با دمای پایین‌تر پایدارتر است
       temperature: opts.temperature ?? 0.4,
@@ -185,5 +254,7 @@ export async function runAgentJSON<T>(opts: AgentJSONOptions<T>): Promise<T> {
       lastError = err instanceof Error ? err.message.slice(0, 500) : String(err);
     }
   }
-  throw new Error(`ایجنت «${opts.agent}» بعد از ۲ تلاش JSON معتبر نداد: ${lastError}`);
+  throw new Error(
+    `ایجنت «${opts.agent}» بعد از ${attempts} تلاش (${budget.used} درخواست) JSON معتبر نداد: ${lastError}`
+  );
 }

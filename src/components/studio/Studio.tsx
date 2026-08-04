@@ -17,6 +17,7 @@ import {
   SCORING_WEIGHTS,
   CRITIC_THRESHOLDS,
   AFFLUENCE_THRESHOLDS,
+  PIPELINE_GUARDS,
   messageLengthFor,
   type ScoringCriterion,
 } from "@/lib/config";
@@ -928,8 +929,8 @@ function LeadsTable({
  * return شرطی وجود ندارد، و `StudioInner` یا کامل رندر می‌شود یا اصلاً نه.
  */
 export function Studio() {
-  const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
-  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} />;
+  const { needsLogin, rejected, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
+  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} rejected={rejected} />;
   return <StudioInner onUnauthorized={onUnauthorized} />;
 }
 
@@ -1048,6 +1049,29 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setMessages(messages);
   }, []);
 
+  /**
+   * تنها مسیر گزارش خطا در این کامپوننت.
+   *
+   * چرا لازم شد: از ۱۶ بلوک catch این فایل، **فقط `bootstrap`** خطای ۴۰۱ را
+   * تشخیص می‌داد. بقیه رشته‌ی «رمز استودیو نادرست است یا وارد نشده.» را در
+   * نوار خطا چاپ می‌کردند — یعنی به کاربر گفته می‌شد رمزت غلط است، بدون
+   * اینکه هیچ فیلدی برای واردکردن رمز نشان داده شود. کاربر روی داشبوردی
+   * می‌ماند که هیچ دکمه‌اش کار نمی‌کند و هیچ راه خروجی هم ندارد.
+   *
+   * ۴۰۱ خطا نیست، یعنی «هنوز وارد نشده‌ای» — فرم ورود جای پیام خطا می‌آید.
+   */
+  const fail = useCallback(
+    (e: unknown, prefix?: string) => {
+      if (e instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(prefix ? `${prefix}: ${msg}` : msg);
+    },
+    [onUnauthorized]
+  );
+
   const bootstrap = useCallback(async () => {
     setBusy("load");
     setError("");
@@ -1059,13 +1083,11 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
         await loadMessages(cs[0].id);
       }
     } catch (e) {
-      // ۴۰۱ خطا نیست، یعنی «هنوز وارد نشده‌ای» — فرم ورود جای پیام خطا می‌آید
-      if (e instanceof UnauthorizedError) onUnauthorized();
-      else setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
-  }, [loadCampaigns, loadLeads, loadMessages, onUnauthorized]);
+  }, [loadCampaigns, loadLeads, loadMessages, fail]);
 
   useEffect(() => {
     void bootstrap();
@@ -1100,16 +1122,40 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setError("");
     setNotice("");
     setArmed(null);
+    /*
+      حالت وابسته به کمپین قبلی باید همین‌جا پاک شود.
+
+      سه چیز جا مانده بود:
+      ۱. `openId` — پنل جزئیاتِ باز، کلیدش در `triggerRefs` به گره‌ای اشاره
+         می‌کرد که با تعویض کمپین از DOM رفته. `togglePanel` بعدی روی همان گره
+         `.focus()` می‌زد، بی‌صدا شکست می‌خورد و فوکوس روی body می‌ماند. همه‌ی
+         مسیرهای دیگر `setOpenId(null)` دارند؛ فقط این یکی نداشت.
+      ۲. مجموعه‌های انتخاب — شناسه‌های کمپین قبلی می‌ماندند، پس دکمه‌ی shortlist
+         «افزودن ۵ لید انتخاب‌شده» می‌نوشت در حالی که هیچ‌کدام دیده نمی‌شدند.
+      ۳. کش‌های `details`/`drafts` — به لید کمپین قبلی گره خورده بودند.
+    */
+    setOpenId(null);
+    leadSel.clear();
+    shortSel.clear();
+    msgSel.clear();
+    campSel.clear();
+    setDetails({});
     try {
       await loadLeads(id);
       await loadMessages(id);
+      const name = campaigns.find((c) => c.id === id)?.name ?? "";
+      // تعویض کمپین کل دو جدول و فهرست پیام‌ها را عوض می‌کند — بدون اعلام،
+      // کاربر صفحه‌خوان هیچ خبری از این جابه‌جایی نمی‌گیرد (نقض ۴.۱.۳)
+      setTaskStatus(`کمپین «${name}» انتخاب شد.`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     }
   }
 
   async function createCampaign(e: FormEvent) {
     e.preventDefault();
+    // `aria-disabled` جلوی submit را نمی‌گیرد؛ گارد واقعی همین است
+    if (busy === "create") return;
     setBusy("create");
     setError("");
     setNotice("");
@@ -1122,16 +1168,23 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       await loadCampaigns();
       setSelectedId(campaign.id);
       await loadLeads(campaign.id);
-      setNotice(`کمپین «${campaign.name}» ساخته شد.`);
+      /*
+        `loadMessages` جا مانده بود، پس بخش «پیام‌ها» پیام‌های کمپین قبلی را
+        زیر کمپین تازه‌ی خالی نشان می‌داد — با دکمه‌های تأیید/رد که کار هم
+        می‌کردند. یعنی می‌شد ناخواسته پیام یک کمپین دیگر را تأیید کرد.
+      */
+      await loadMessages(campaign.id);
+      setTaskStatus(`کمپین «${campaign.name}» ساخته شد.`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
   }
 
   async function discover() {
-    if (!selectedId) return;
+    // گارد دوم، داخل خود تابع: گاردِ روی دکمه فقط مسیر کلیک را می‌بندد.
+    if (!selectedId || busy === "discover" || busyAny) return;
     setBusy("discover");
     setError("");
     setNotice("");
@@ -1144,18 +1197,33 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           invalid: number;
           webSearches: number;
           webLeads: number;
+          googleSearches?: number;
+          alreadyKnown?: number;
+          knownTrashed?: number;
           notes?: string[];
         };
       }>("/api/discovery", { method: "POST", body: JSON.stringify({ campaignId: selectedId }) });
       // notes توضیح می‌دهد چرا نتیجه کم بود — بدون آن، «۰ لید» بی‌سرنخ می‌ماند
       const notes = summary.notes?.length ? ` ${summary.notes.join(" ")}` : "";
+      /*
+        «تکراری» به دو عدد شکسته شد چون یک کلمه بود برای دو چیز کاملاً متفاوت:
+        «از قبل در پایگاه داشتمش» و «دو منبع یک کسب‌وکار را آوردند». تا وقتی
+        قاطی بودند، مالک نمی‌توانست بفهمد کشف واقعاً چیز تازه‌ای پیدا نمی‌کند یا
+        فقط منابع هم‌پوشانی دارند.
+      */
+      const known = summary.alreadyKnown ?? summary.duplicates;
+      const trashed = summary.knownTrashed ?? 0;
+      const trashNote = trashed > 0 ? ` (${fa(trashed)} در سطل زباله)` : "";
+      const gs = summary.googleSearches ?? 0;
       setNotice(
-        `کشف انجام شد: ${fa(summary.found)} یافت، ${fa(summary.inserted)} جدید، ${fa(summary.duplicates)} تکراری، ${fa(summary.invalid)} نامعتبر — ` +
-          `${fa(summary.webSearches)} جست‌وجوی وب مصرف شد و ${fa(summary.webLeads)} لید از آن آمد.${notes}`
+        `کشف انجام شد: ${fa(summary.found)} کسب‌وکار دیده شد · ${fa(summary.inserted)} تازه ثبت شد · ` +
+          `${fa(known)} از قبل بود${trashNote} · ${fa(summary.invalid)} بدون راه تماس — ` +
+          `${fa(summary.webSearches)} جست‌وجوی وب و ${fa(gs)} جست‌وجوی گوگل مصرف شد، ` +
+          `${fa(summary.webLeads)} لید از جست‌وجو آمد.${notes}`
       );
       await loadLeads(selectedId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
@@ -1175,7 +1243,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setTaskStatus(`تحلیل «${lead.businessName}» شروع شد…`);
     try {
       let last = "";
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < PIPELINE_GUARDS.maxClientSteps; i++) {
         const res = await api<{ step: { ran: string; status: LeadStatus; score: number | null; summary: string } | null; done: boolean }>(
           "/api/pipeline",
           { method: "POST", body: JSON.stringify({ leadId: lead.id, step: true, force: true }) }
@@ -1192,6 +1260,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       }
       await loadDetail(lead.id);
     } catch (e) {
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setError(`تحلیل «${lead.businessName}» ناموفق بود: ${msg}`);
       setTaskStatus("");
@@ -1227,10 +1296,11 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
         `توان مالی هر ${fa(res.total)} لید از نو محاسبه شد (${fa(res.changed)} نمره عوض شد). ` +
         `${fa(res.worthAnalyzing)} لید نمره‌ی ${fa(res.threshold)} یا بالاتر دارند و ارزش تحلیل دارند؛ ` +
         `${fa(res.total - res.worthAnalyzing)} تا کم‌ارزش‌اند و تحلیل گروهی سراغشان نمی‌رود.`;
-      setNotice(msg);
+      // فقط یک کانال: `notice` و `taskStatus` هر دو live region‌اند و نوشتنِ
+      // یک متن در هر دو، دوبار اعلام می‌کند
       setTaskStatus(msg);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
       setTaskStatus("");
     } finally {
       setBusy(null);
@@ -1316,12 +1386,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           setTaskStatus(
             `پیام «${res.businessName ?? "لید"}» آماده شد و در بخش پیام‌ها منتظر تأیید توست. در حال ادامه…`
           );
-          await loadMessages(selectedId).catch(() => {});
+          if (selectedId) await loadMessages(selectedId).catch(() => {});
         }
       }
 
       await loadLeads(selectedId);
-      await loadMessages(selectedId).catch(() => {});
+      if (selectedId) await loadMessages(selectedId).catch(() => {});
       setTaskStatus(
         `تحلیل فهرست منتخب تمام شد. ${fa(analyzed)} لید تحلیل شد و ${fa(drafted)} پیش‌نویس پیام ساخته شد. ` +
           (skipped > 0
@@ -1330,6 +1400,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           "جدول لیدها و بخش پیام‌ها به‌روزرسانی شد."
       );
     } catch (e) {
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setError(
         analyzed > 0
@@ -1356,7 +1427,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setError("");
     setTaskStatus(`تولید پیام برای «${lead.businessName}» شروع شد…`);
     try {
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < PIPELINE_GUARDS.maxClientSteps; i++) {
         // only:"message" → سرور اگر لید تحلیل‌نشده باشد ۴۰۹ می‌دهد و توکنی خرج نمی‌شود
         const res = await api<{ step: { ran: string; summary: string } | null; done: boolean }>(
           "/api/pipeline",
@@ -1372,6 +1443,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       }
       setTaskStatus(`پیام «${lead.businessName}» آماده شد و در بخش پیام‌ها منتظر تأیید توست.`);
     } catch (e) {
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setError(`تولید پیام «${lead.businessName}» ناموفق بود: ${msg}`);
       setTaskStatus("");
@@ -1414,7 +1486,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           setTaskStatus(
             `پیام «${res.businessName ?? "لید"}» آماده شد. ${fa(res.remaining)} لید باقی مانده. در حال ادامه…`
           );
-          await loadMessages(selectedId).catch(() => {});
+          if (selectedId) await loadMessages(selectedId).catch(() => {});
           await loadLeads(selectedId).catch(() => {});
         } else {
           setTaskStatus(`«${res.businessName ?? "لید"}»: ${res.step.summary}`);
@@ -1425,6 +1497,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       await loadMessages(selectedId);
       setTaskStatus(`تولید پیام فهرست منتخب تمام شد. ${fa(made)} پیام آماده‌ی تأیید است.`);
     } catch (e) {
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setError(
         made > 0
@@ -1432,7 +1505,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           : `تولید پیام فهرست منتخب ناموفق بود: ${msg}`
       );
       setTaskStatus("");
-      await loadMessages(selectedId).catch(() => {});
+      if (selectedId) await loadMessages(selectedId).catch(() => {});
     } finally {
       setMsgGenRunning(false);
     }
@@ -1446,7 +1519,16 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setBusy("shortlist");
     setError("");
     try {
-      const ids = Array.from(leadSel.selected);
+      /*
+        `visibleSelected` نه `leadSel.selected` خام.
+
+        مجموعه‌ی انتخاب موقع عوض‌کردن کمپین پاک نمی‌شد، پس شناسه‌های کمپین قبلی
+        داخلش می‌ماندند و این PATCH لیدهای **کمپین دیگری** را منتخب می‌کرد —
+        لیدهایی که کاربر اصلاً نمی‌دیدشان. همه‌ی DeleteBarها از قبل فیلتر
+        می‌کردند؛ فقط این دو مسیر جا مانده بودند.
+      */
+      const ids = leadSel.visibleSelected(unshortlisted.map((l) => l.id));
+      if (ids.length === 0) return;
       const res = await api<{ updated: number }>("/api/leads", {
         method: "PATCH",
         body: JSON.stringify({ ids, shortlisted: true }),
@@ -1460,9 +1542,8 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       // فوکوس به مقصد: سرتیتر «فهرست منتخب» شمارنده‌ی جدید را دارد
       shortlistHeadingRef.current?.focus();
       setTaskStatus(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
-      setNotice(`${fa(res.updated)} لید به فهرست منتخب اضافه شد.`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
@@ -1474,7 +1555,9 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     setBusy("shortlist");
     setError("");
     try {
-      const ids = Array.from(shortSel.selected);
+      // همان دلیل addToShortlist — فیلتر «دیده‌شده» لازم است
+      const ids = shortSel.visibleSelected(shortlisted.map((l) => l.id));
+      if (ids.length === 0) return;
       const res = await api<{ updated: number }>("/api/leads", {
         method: "PATCH",
         body: JSON.stringify({ ids, shortlisted: false }),
@@ -1484,9 +1567,8 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       await loadLeads(selectedId);
       leadsHeadingRef.current?.focus();
       setTaskStatus(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
-      setNotice(`${fa(res.updated)} لید به فهرست اصلی برگشت.`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
@@ -1508,7 +1590,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           : `یافته‌ی اینستاگرام «${businessName}» پاک شد.`
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     }
   }
 
@@ -1542,6 +1624,8 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
         `متن پیام «${m.businessName}» ذخیره و دوباره توسط نگهبان سیاست بررسی شد. نتیجه‌ی جدید در همین کارت آمده است.`
       );
     } catch (e) {
+      // ۴۰۱ داخل کارت پیام نمی‌ماند — کل داشبورد باید به فرم ورود برود
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setCardError((p) => ({ ...p, [m.id]: msg }));
       setTaskStatus(`خطا در ذخیره‌ی پیام «${m.businessName}»: ${msg}`);
@@ -1580,6 +1664,8 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             : `ارسال پیام «${m.businessName}» ثبت شد.`
       );
     } catch (e) {
+      // ۴۰۱ داخل کارت پیام نمی‌ماند — کل داشبورد باید به فرم ورود برود
+      if (e instanceof UnauthorizedError) return fail(e);
       const msg = e instanceof Error ? e.message : String(e);
       setCardError((p) => ({ ...p, [m.id]: msg }));
       setTaskStatus(`خطا در پیام «${m.businessName}»: ${msg}`);
@@ -1596,15 +1682,27 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     }
   }
 
-  /** جزئیات یک لید (تحلیل + تایم‌لاین) */
-  const loadDetail = useCallback(async (leadId: string) => {
-    try {
-      const d = await api<LeadDetail>(`/api/leads/${leadId}`);
-      setDetails((prev) => ({ ...prev, [leadId]: d }));
-    } catch {
-      /* جزئیات اختیاری است — سکوت */
-    }
-  }, []);
+  /**
+   * جزئیات یک لید (تحلیل + تایم‌لاین).
+   *
+   * `catch` خالی قبلی هر خطایی را می‌بلعید و چون پنل تا وقتی `detail` تهی است
+   * «در حال بارگذاری جزئیات…» نشان می‌دهد، یک ۴۰۴ (لید حذف‌شده) یا قطعی شبکه
+   * آن متن را **برای همیشه** روی صفحه نگه می‌داشت.
+   */
+  const loadDetail = useCallback(
+    async (leadId: string) => {
+      try {
+        const d = await api<LeadDetail>(`/api/leads/${leadId}`);
+        setDetails((prev) => ({ ...prev, [leadId]: d }));
+      } catch (e) {
+        if (e instanceof UnauthorizedError) return fail(e);
+        setTaskStatus(
+          `جزئیات این لید بارگذاری نشد: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    },
+    [fail]
+  );
 
   /**
    * باز/بسته‌کردن پنل جزئیات.
@@ -1624,29 +1722,54 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   async function addManualLead(e: FormEvent) {
     e.preventDefault();
+    if (busy === "manual") return; // گارد واقعی — aria-disabled جلوی submit را نمی‌گیرد
+    /*
+      بدون کمپین انتخاب‌شده، لید با `campaignId: null` ساخته می‌شد و چون
+      `loadLeads` همیشه بر اساس کمپین فیلتر می‌کند، **هیچ‌جای رابط دیده
+      نمی‌شد** — در حالی که پیام «لید دستی اضافه شد» سبز نمایش داده می‌شد.
+      لید واقعاً در دیتابیس بود و کاربر فکر می‌کرد گم شده.
+    */
+    if (!selectedId) {
+      setError("اول یک کمپین انتخاب کن؛ وگرنه لید به هیچ کمپینی وصل نمی‌شود و در فهرست دیده نمی‌شود.");
+      return;
+    }
     setBusy("manual");
     setError("");
     setNotice("");
     try {
-      await api("/api/leads", {
-        method: "POST",
-        body: JSON.stringify({
-          campaignId: selectedId || null,
-          businessName: mName,
-          city: mCity,
-          instagram: mInstagram,
-          phone: mPhone,
-          website: mWebsite,
-        }),
-      });
-      setMName("");
-      setMInstagram("");
-      setMPhone("");
-      setMWebsite("");
-      setNotice("لید دستی اضافه شد.");
-      if (selectedId) await loadLeads(selectedId);
+      const res = await api<{ inserted: number; duplicates: number; invalid: number }>(
+        "/api/leads",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            campaignId: selectedId,
+            businessName: mName,
+            city: mCity,
+            instagram: mInstagram,
+            phone: mPhone,
+            website: mWebsite,
+          }),
+        }
+      );
+      /*
+        سرور `{inserted, duplicates, invalid}` برمی‌گرداند ولی این تابع کل
+        بدنه را نادیده می‌گرفت و همیشه «لید دستی اضافه شد» می‌گفت — حتی وقتی
+        لید تکراری بود یا نام نامعتبر داشت و `inserted: 0` برگشته بود.
+      */
+      if (res.inserted > 0) {
+        setMName("");
+        setMInstagram("");
+        setMPhone("");
+        setMWebsite("");
+        setTaskStatus("لید دستی اضافه شد.");
+      } else if (res.duplicates > 0) {
+        setError("این کسب‌وکار از قبل در پایگاه هست (یا در سطل زباله). چیزی اضافه نشد.");
+      } else {
+        setError("لید معتبر نبود — دست‌کم نام و یک راه تماس لازم است. چیزی اضافه نشد.");
+      }
+      await loadLeads(selectedId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
@@ -1675,10 +1798,12 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
         body: JSON.stringify({ campaignId: selectedId || null, leads }),
       });
       setCsv("");
-      setNotice(`ورود CSV: ${res.inserted} افزوده، ${res.duplicates} تکراری، ${res.invalid} نامعتبر.`);
+      setTaskStatus(
+        `ورود CSV: ${fa(res.inserted)} افزوده، ${fa(res.duplicates)} تکراری، ${fa(res.invalid)} نامعتبر.`
+      );
       if (selectedId) await loadLeads(selectedId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      fail(e);
     } finally {
       setBusy(null);
     }
@@ -1722,10 +1847,18 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   /** تحلیل گروهی وقتی معنا دارد که دست‌کم یک لید منتخبِ تحلیل‌نشده باشد */
   const canAnalyzeShortlist = shortUnanalyzed > 0;
   /**
-   * پیام گروهی فقط وقتی که **همه‌ی** منتخب‌ها تحلیل شده‌اند و دست‌کم یکی
-   * آماده‌ی پیام است — تا نصفه‌کاره شروع نشود.
+   * پیام گروهی فقط به وجود دست‌کم یک لید آماده نیاز دارد.
+   *
+   * شرط قبلی `shortUnanalyzed === 0` هم بود، یعنی **یک** لید تحلیل‌نشده در
+   * فهرست منتخب کل دکمه را می‌بست. با دروازه‌ی توان مالی این حالت دائمی
+   * می‌شد: لید کم‌ارزش به `LOW_VALUE` می‌رفت، در `shortUnanalyzed` شمرده
+   * می‌شد و تا وقتی مالک دستی تحلیلش نمی‌کرد دکمه مرده می‌ماند. از دید مالک
+   * «دکمه کار نمی‌کند».
+   *
+   * کار روی لیدهای آماده انجام می‌شود و بقیه دست‌نخورده می‌مانند — که رفتار
+   * درست است، نه «نصفه‌کاره».
    */
-  const canGenerateAll = shortReadyForMessage > 0 && shortUnanalyzed === 0;
+  const canGenerateAll = shortReadyForMessage > 0;
 
   const visibleMessages = msgFilter === "all" ? messages : messages.filter((m) => m.status === msgFilter);
   // حذف پیام تأییدشده/ارسال‌شده، قیف تبدیل بازه‌های گذشته را عقب می‌برد چون
@@ -1742,8 +1875,28 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   return (
     <div className="space-y-10">
-      {/* کانال اعلان کارهای پس‌زمینه — همیشه رندر؛ key باعث اعلام پیام تکراری می‌شود */}
-      <div role="status" className="sr-only">
+      {/*
+        کانال اعلان کارهای پس‌زمینه — حالا **مرئی**، نه فقط sr-only.
+
+        قبلاً این تنها کانال بازخورد بود و `sr-only` داشت، یعنی کاربر بینا از
+        کپی‌کردن متن، ذخیره‌ی یافته، تأیید/رد پیام و هر حذف گروهی **هیچ نشانه‌ای
+        نمی‌گرفت** — نه موفقیت، نه شکست. بخش بزرگی از «دکمه‌ها کار نمی‌کنند»
+        همین بود: دکمه کار می‌کرد و چیزی نمی‌گفت.
+
+        عمداً یک گره است نه دو تا: همان live region مرئی می‌شود. دو گره (یکی
+        مرئی، یکی sr-only) با متن یکسان، اعلام دوباره می‌سازد.
+        `role="status"` خودش `aria-atomic` دارد، پس هیچ آیکن یا پیشوندی داخلش
+        نمی‌رود وگرنه هر بار کامل دوباره خوانده می‌شود.
+        `min-h` جلوی پرش چیدمان را می‌گیرد.
+      */}
+      <div
+        role="status"
+        className={
+          taskStatusState.text
+            ? "min-h-9 rounded-lg border border-surface-line bg-surface-dim px-3 py-2 text-sm leading-7 text-ink"
+            : "min-h-9"
+        }
+      >
         <span key={taskStatusState.n}>{taskStatusState.text}</span>
       </div>
 
@@ -1872,10 +2025,26 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           </div>
 
           <div className="sm:col-span-2 lg:col-span-4">
+            {/*
+              `aria-disabled` نه `disabled` — قرارداد بقیه‌ی داشبورد.
+
+              عنصر `disabled` فوکوس‌پذیر نیست: کاربر صفحه‌کلید که با Tab روی
+              دکمه رسیده و Enter زده، همان لحظه فوکوسش به body پرت می‌شود و
+              Tab بعدی از اول سند شروع می‌کند — وسط کار.
+
+              چون `aria-disabled` جلوی submit را نمی‌گیرد، گارد واقعی داخل خود
+              `createCampaign` است. `disabled:opacity-60` هم رفت: با
+              `aria-disabled` دیگر شبه‌کلاس `:disabled` جور نمی‌شود، و آن حالت
+              نسبت کنتراست ۳.۷:۱ می‌داد که برای عنصر فوکوس‌پذیر مردود است.
+            */}
             <button
               type="submit"
-              disabled={busy === "create"}
-              className="rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700 disabled:opacity-60"
+              aria-disabled={busy === "create"}
+              className={
+                busy === "create"
+                  ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                  : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
+              }
             >
               {busy === "create" ? "در حال ساخت…" : "ساخت کمپین"}
             </button>
@@ -1890,26 +2059,47 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             id="campaigns-heading"
             ref={campaignsHeadingRef}
             tabIndex={-1}
-            className="text-lg font-extrabold text-ink"
+            className="text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
           >
             کمپین‌ها ({campaigns.length})
           </h2>
           <div role="group" aria-label="عملیات کمپین انتخابی" className="flex flex-wrap items-center gap-3">
+            {/*
+              گارد واقعی، نه `onClickCapture` + `preventDefault`.
+
+              نسخه‌ی قبلی کار نمی‌کرد: روی `type="button"` هیچ رفتار پیش‌فرضی
+              وجود ندارد که `preventDefault` لغوش کند، و جلوی هندلر فاز حبابی
+              روی همان عنصر را هم نمی‌گیرد. یعنی `aria-disabled` وضعیتی را
+              گزارش می‌کرد که دکمه رعایتش نمی‌کرد (نقض ۴.۱.۲) و دو کلیک سریع
+              **دو کشف هم‌زمان** می‌فرستاد — دو برابر مصرف سهمیه‌ی Tavily و
+              دو پاسخ درهم‌رونده روی جدول لیدها.
+            */}
             <button
               type="button"
-              onClick={discover}
-              aria-disabled={!selectedId || busy === "discover" || busyAny}
-              onClickCapture={(e) => {
-                if (!selectedId || busy === "discover" || busyAny) e.preventDefault();
+              onClick={() => {
+                if (!selectedId || busy === "discover" || busyAny) return;
+                void discover();
               }}
+              aria-disabled={!selectedId || busy === "discover" || busyAny}
+              aria-describedby="discover-note"
               className={
                 !selectedId || busy === "discover" || busyAny
                   ? "rounded-lg bg-surface-dim px-5 py-2.5 text-sm font-bold text-ink-muted"
                   : "rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
               }
             >
-              {busy === "discover" ? "در حال کشف لید…" : "کشف لید برای کمپین انتخابی 🔎"}
+              {busy === "discover" ? "در حال کشف لید…" : "کشف لید برای کمپین انتخابی"}
+              <span aria-hidden="true"> 🔎</span>
             </button>
+            <p id="discover-note" className="sr-only">
+              {!selectedId
+                ? "برای کشف لید، اول یک کمپین را از فهرست پایین انتخاب کن."
+                : busy === "discover"
+                  ? "کشف در حال اجراست؛ تا تمام شدنش صبر کن."
+                  : busyAny
+                    ? "یک کار مدل‌محور در حال اجراست؛ بعد از تمام شدنش دوباره بزن."
+                    : "کسب‌وکارهای تازه‌ی کمپین انتخابی را پیدا می‌کند. هر بار بخش تازه‌ای از شهر گشته می‌شود."}
+            </p>
 
             {/* رایگان — قبل از تحلیل گروهی بزن تا بدانی کدام لیدها ارزش توکن دارند */}
             <button
@@ -2077,10 +2267,15 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             />
           </div>
           <div className="sm:col-span-2 lg:col-span-4">
+            {/* همان دلیل «ساخت کمپین» — گارد واقعی داخل addManualLead است */}
             <button
               type="submit"
-              disabled={busy === "manual"}
-              className="rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700 disabled:opacity-60"
+              aria-disabled={busy === "manual"}
+              className={
+                busy === "manual"
+                  ? "rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                  : "rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-bold text-white shadow-card transition-colors hover:bg-brand-700"
+              }
             >
               {busy === "manual" ? "در حال افزودن…" : "افزودن لید"}
             </button>
@@ -2100,14 +2295,35 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             placeholder="کلینیک نمونه, @clinic_ig, 02112345678, https://example.com"
             className="mt-2 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
           />
+          {/*
+            این یکی از دو تای بالا بدتر بود: `disabled` **پیش از هر تعاملی**
+            روشن است (چون textarea خالی است)، پس کاربر صفحه‌خوان موقع Tab اصلاً
+            به آن نمی‌رسید و هیچ توضیحی هم نمی‌گرفت که چرا. حالا فوکوس‌پذیر
+            است و `aria-describedby` دلیلش را می‌گوید.
+          */}
           <button
             type="button"
-            onClick={importCsv}
-            disabled={busy === "csv" || !csv.trim()}
-            className="mt-3 rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark disabled:opacity-60"
+            onClick={() => {
+              if (busy === "csv" || !csv.trim()) return;
+              void importCsv();
+            }}
+            aria-disabled={busy === "csv" || !csv.trim()}
+            aria-describedby="csv-gate-note"
+            className={
+              busy === "csv" || !csv.trim()
+                ? "mt-3 rounded-lg border border-ink-muted bg-surface px-5 py-2.5 text-sm font-bold text-ink-muted"
+                : "mt-3 rounded-lg bg-pine px-5 py-2.5 text-sm font-bold text-bone shadow-card transition-colors hover:bg-pine-dark"
+            }
           >
             {busy === "csv" ? "در حال ورود…" : "ورود انبوه از CSV"}
           </button>
+          <p id="csv-gate-note" className="sr-only">
+            {busy === "csv"
+              ? "ورود CSV در حال اجراست."
+              : !csv.trim()
+                ? "برای فعال‌شدن، متن CSV را در کادر بالا بچسبان."
+                : "ردیف‌های کادر بالا را به‌عنوان لید وارد می‌کند."}
+          </p>
         </div>
       </section>
 
@@ -2118,7 +2334,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             id="leads-heading"
             ref={leadsHeadingRef}
             tabIndex={-1}
-            className="text-lg font-extrabold text-ink"
+            className="text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
           >
             همه‌ی لیدها ({fa(unshortlisted.length)})
           </h2>
@@ -2160,7 +2376,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
               leadSel.clear();
               setOpenId(null); // کلید پنل باز شامل شناسه‌ی لیدِ رفته است
               if (selectedId) await loadLeads(selectedId);
-              await loadMessages(selectedId).catch(() => {});
+              if (selectedId) await loadMessages(selectedId).catch(() => {});
             }}
             refocus={() => leadsHeadingRef.current?.focus()}
             extraWarning="پیام‌ها، تحلیل و پیگیریِ این لیدها هم با آن‌ها می‌روند."
@@ -2198,7 +2414,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             id="shortlist-heading"
             ref={shortlistHeadingRef}
             tabIndex={-1}
-            className="text-lg font-extrabold text-ink"
+            className="text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
           >
             فهرست منتخب ({fa(shortlisted.length)})
           </h2>
@@ -2308,7 +2524,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
               shortSel.clear();
               setOpenId(null);
               if (selectedId) await loadLeads(selectedId);
-              await loadMessages(selectedId).catch(() => {});
+              if (selectedId) await loadMessages(selectedId).catch(() => {});
             }}
             refocus={() => shortlistHeadingRef.current?.focus()}
             extraWarning="پیام‌ها، تحلیل و پیگیریِ این لیدها هم با آن‌ها می‌روند."
@@ -2345,7 +2561,7 @@ function StudioInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           id="messages-heading"
           ref={messagesHeadingRef}
           tabIndex={-1}
-          className="mb-2 text-lg font-extrabold text-ink"
+          className="mb-2 text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
         >
           پیام‌ها ({fa(messages.length)})
         </h2>

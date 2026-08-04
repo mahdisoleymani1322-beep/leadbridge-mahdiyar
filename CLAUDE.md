@@ -42,7 +42,8 @@ This drives a hard split you must preserve:
 - `runAgentText` — free-form text output (used by the message Writer).
 - `runAgentJSON` — structured output with **Zod validation + one automatic retry** that feeds the parse error back to the model. Do **not** rely on model-native JSON mode (inconsistent across OpenRouter models); this validate-and-retry loop is the intended pattern. JSON is manually extracted from the response before parsing.
 - A `fetch` wrapper forces `reasoning: { effort: "low" }` on every request, so reasoning-heavy models don't burn the whole token budget.
-- Model is `PIPELINE_MODEL` (default `google/gemini-2.5-flash`) for all agents; `WRITER_MODEL` optionally overrides just the Writer.
+- Model is `PIPELINE_MODEL` (default **`openai/gpt-oss-20b:free`** — chosen by live testing on Persian leads: fluent Persian, stable JSON); `WRITER_MODEL` optionally overrides just the Writer. `MODEL_FALLBACKS` (default: gpt-oss-20b → nemotron-3-super → nemotron-3-nano, all `:free`) is tried on a retriable error (429/503/timeout).
+- **`AI_LIMITS.maxUpstreamRequestsPerCall` caps the whole thing.** The fallback chain and the JSON retry loop share one `CallBudget`, so a single logical agent call can never exceed that many upstream requests. Before this cap the two layers multiplied (3 models × 2 attempts = 6), and one lead needing a revision round could theoretically spend 54 requests.
 
 **Storage — [src/lib/store/](src/lib/store/) (Adapter pattern).** The entire system talks only to the `LeadStore` interface ([types.ts](src/lib/store/types.ts)). `getStore()` auto-selects `SupabaseStore` (production) if Supabase env vars are present, else `MemoryStore` (dev fallback, persisted on `globalThis` to survive hot-reloads). **Agents and the orchestrator must never touch the database directly** — always go through the store.
 - Domain types are **camelCase**; DB columns are **snake_case**. All conversion is centralized in [supabase.ts](src/lib/store/supabase.ts) via `toRow`/`fromRow` pairs. When adding a field, update the type, both mappers, and `supabase/schema.sql`.
@@ -52,15 +53,27 @@ This drives a hard split you must preserve:
 
 **Agent module pattern** (see `_archive/blog/src/lib/agents/writer.ts`): each agent is a file exporting (a) an async system-prompt builder that composes brand blocks + `lessonsBlockFor(...)`, and (b) a `run…` function that calls `runAgentText`/`runAgentJSON`. Server-only modules start with `import "server-only"`.
 
-## Build status (phased)
+**Discovery — [src/lib/discovery.ts](src/lib/discovery.ts).** Deterministic service, zero LLM tokens. Sources run in parallel via `Promise.allSettled` (one failing must not kill the others) and each **advances a persisted per-campaign cursor** (`campaigns.discovery_cursor`, migration 007):
+- OpenStreetMap splits the city bbox into a `OSM.tileGrid²` mesh sorted centre-outward and queries `OSM.tilesPerRun` tiles per run. Overpass QL has no `OFFSET` — changing the bbox is the only way to change the result set.
+- Tavily and Google Programmable Search walk their (term × pattern) plan from a stored index. Per-run call caps stay put; depth comes from **where the run starts**, so free quotas are untouched.
+- **The "already known?" filter runs before the daily-limit slice**, via the batch `store.findExistingDedupKeys`. Getting this order wrong is what made every run return the same 20 businesses forever — the slice spent all the slots on known leads and discarded the rest unseen.
+- The dedup key is computed once from source data and **frozen until insert**. Never let enrichment (e.g. Instagram) mutate a field the key depends on, or the same business gets two keys across runs and is inserted twice.
+- Soft-deleted leads deliberately still count as "known" (`findExistingDedupKeys` does not filter `deleted_at`) — that's the anti-resurrection mechanism from migration 006. They're reported separately as `knownTrashed`.
 
-Implemented directories reflect the phase. `src/lib/integrations/` and most of `src/lib/agents/` do **not exist yet** — they are created in later phases.
+**Instagram is currently off** — `IG_ACCESS_TOKEN` / `IG_BUSINESS_ID` are unset, so `businessDiscovery` no-ops. The manual `Lead.igNote` field is the working substitute and feeds the analysis prompt as a confirmed human observation.
 
-- ✅ **Phase 1** — infrastructure + brand + data (store/CRM, schema, brand, config).
-- ⏳ Phase 2 — lead discovery (Google Places New + Instagram Graph `business_discovery`) + channel extraction + leads dashboard.
-- ⏳ Phase 3 — analysis + scoring + service/portfolio selection.
-- ⏳ Phase 4 — message generation + critic + human approval.
-- ⏳ Phase 5 — handover + self-improvement + semi-automatic sending.
+## Build status
+
+**All five roadmap phases are built and running.** `src/lib/integrations/` and `src/lib/agents/` both exist and are complete — discovery, channel extraction, lead analysis, scoring, service match, portfolio select, message writer, critic, policy guard, lesson writer.
+
+Built beyond the roadmap (no phase of their own):
+- **CRM** — `src/app/api/crm/` + `src/components/studio/Crm.tsx`: funnel, per-campaign stats, follow-ups.
+- **Decision journal** — `src/lib/audit.ts`, surfaced in the CRM page.
+- **Conversations / follow-ups** — reply state, sentiment, next action.
+- **Soft delete + trash with restore** — migrations up to `006_soft_delete.sql`.
+- **Progressive discovery cursor** — `007_discovery_cursor.sql`.
+
+Migrations live in `supabase/migrations/`. **Run the SQL before pushing code that needs it**; the code degrades gracefully if a migration hasn't run, but the reverse (code first) is what makes the dashboard break.
 
 ## Spec source of truth
 
@@ -69,7 +82,7 @@ Implemented directories reflect the phase. `src/lib/integrations/` and most of `
 ## Hard product constraints (roadmap §3.3)
 
 These are non-negotiable and enforced in code/config:
-- Official APIs only — Google Places (New) + Instagram Graph `business_discovery` (public data only). No unbounded scraping, no mass cold DMs.
+- **Public data through documented interfaces only.** No unbounded scraping, no mass cold DMs, no logged-in-session automation. In practice: OpenStreetMap (Nominatim + Overpass) as the default map source, Google Places (New) when `GOOGLE_MAPS_API_KEY` is set, Tavily + Google Programmable Search for web search, Instagram Graph `business_discovery` for public page data, plus reading a business's **own** public website. The roadmap phrased this as "Places + Instagram Graph only" because those were the only two sources at the time — the principle binds, not that list.
 - Every message is a **draft + human approval** before sending.
 - Messages contain **no price, discount, or contract** claims; personalization must be grounded in each business's real, evidenced pain point (see `BANNED_WORDS` / critic `accuracy` + `constraints` criteria).
 

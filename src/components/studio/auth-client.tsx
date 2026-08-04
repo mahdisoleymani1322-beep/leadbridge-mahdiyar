@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 /**
  * احراز هویت سمت کلاینت برای داشبورد — مشترک بین /studio و /studio/crm.
@@ -61,30 +61,86 @@ export async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
  * درست، و خطای متصل با aria-describedby که همیشه رندر می‌شود تا هدف
  * پایداری باشد.
  */
-export function StudioLogin({ onSaved }: { onSaved: () => void }) {
+export function StudioLogin({
+  onSaved,
+  /** آیا این فرم بعد از رد شدن یک نشست آمده یا اولین بار است؟ */
+  rejected = false,
+}: {
+  onSaved: () => void;
+  rejected?: boolean;
+}) {
   const [value, setValue] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
 
-  const submit = (e: FormEvent) => {
+  /*
+    فوکوس روی **عنوان**، نه روی فیلد رمز.
+
+    اگر فوکوس مستقیم روی input برود، صفحه‌خوان وارد حالت فرم می‌شود و فقط
+    «رمز استودیو، edit, protected» را می‌خواند — کاربر هیچ‌وقت نمی‌فهمد چرا
+    وسط کار به فرم ورود پرت شده. عنوان و پاراگراف زیرش همان توضیح‌اند.
+  */
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
+  /**
+   * رمز **قبل از پذیرفتن** با یک درخواست واقعی سنجیده می‌شود.
+   *
+   * باگی که این رفع می‌کند — و از هر باگ دکمه‌ای که پیدا شد بدتر بود: نسخه‌ی
+   * قبلی رمز را بی‌قیدوشرط در localStorage می‌نوشت و `onSaved()` می‌زد. با رمز
+   * اشتباه چرخه این می‌شد: فرم → داشبورد → اولین درخواست ۴۰۱ → فرم خالی →
+   * دوباره از اول. **هیچ پیام خطایی هیچ‌وقت نمایش داده نمی‌شد** و مالک برای
+   * همیشه بیرون می‌ماند بدون اینکه بفهمد چرا. تنها راه خروج، پاک‌کردن
+   * localStorage از کنسول بود.
+   */
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     const pw = value.trim();
     if (!pw) {
       setErr("رمز را وارد کن.");
       return;
     }
-    window.localStorage.setItem(KEY, pw);
+    setBusy(true);
     setErr("");
-    onSaved();
+    try {
+      const res = await fetch("/api/campaigns", {
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", "x-studio-password": pw },
+      });
+      if (res.status === 401) {
+        setErr("رمز درست نیست. دوباره امتحان کن.");
+        return;
+      }
+      if (!res.ok) {
+        setErr(`سرور جواب نداد (خطای ${res.status}). چند لحظه بعد دوباره امتحان کن.`);
+        return;
+      }
+      window.localStorage.setItem(KEY, pw);
+      onSaved();
+    } catch {
+      setErr("اتصال برقرار نشد. اینترنت را چک کن و دوباره بزن.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <section aria-labelledby="login-heading" className="mx-auto max-w-md">
-      <h2 id="login-heading" className="mb-2 text-lg font-extrabold text-ink">
+      <h2
+        id="login-heading"
+        ref={headingRef}
+        tabIndex={-1}
+        className="mb-2 text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
+      >
         ورود به داشبورد
       </h2>
       <p className="mb-4 text-sm leading-7 text-ink-muted">
-        این داشبورد اطلاعات تماس کسب‌وکارها را نشان می‌دهد و دکمه‌هایش سهمیه‌ی مدل را خرج می‌کنند،
-        پس با رمز محافظت می‌شود.
+        {rejected
+          ? "نشست منقضی شد یا رمز پذیرفته نشد. برای ادامه رمز را دوباره وارد کن."
+          : "این داشبورد اطلاعات تماس کسب‌وکارها را نشان می‌دهد و دکمه‌هایش سهمیه‌ی مدل را خرج می‌کنند، پس با رمز محافظت می‌شود."}
       </p>
       <form
         onSubmit={submit}
@@ -103,19 +159,25 @@ export function StudioLogin({ onSaved }: { onSaved: () => void }) {
             aria-describedby="studio-pw-err"
             className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
           />
+          {/*
+            role="alert" **همیشه** روی عنصر است، نه اینکه هم‌زمان با آمدن متن
+            روشن شود. افزودن role به عنصر موجود در همان لحظه‌ی تغییر متن، در
+            Chrome/NVDA غیرقابل‌اتکا اعلام می‌شود.
+          */}
           <p
             id="studio-pw-err"
+            role="alert"
             className={err ? "text-sm text-danger" : "sr-only"}
-            role={err ? "alert" : undefined}
           >
             {err}
           </p>
         </div>
         <button
           type="submit"
+          aria-disabled={busy}
           className="w-full rounded-lg bg-pine px-4 py-2 text-sm font-bold text-bone transition-colors hover:bg-pine-dark"
         >
-          ورود
+          {busy ? "در حال بررسی…" : "ورود"}
         </button>
       </form>
     </section>
@@ -130,14 +192,28 @@ export function StudioLogin({ onSaved }: { onSaved: () => void }) {
  */
 export function useStudioAuth() {
   const [needsLogin, setNeedsLogin] = useState(false);
+  /**
+   * آیا فرم ورود به‌خاطر **رد شدن** آمده یا اولین بازدید است؟
+   *
+   * متن فرم بین این دو حالت فرق می‌کند: «نشست منقضی شد» در برابر توضیح اینکه
+   * اصلاً چرا رمز لازم است. بدون تفکیک، کاربری که وسط کار پرت شده همان متن
+   * خوش‌آمد اولیه را می‌بیند و فکر می‌کند چیزی خراب نشده.
+   */
+  const [rejected, setRejected] = useState(false);
   const [ready, setReady] = useState(false);
 
   // localStorage فقط در مرورگر هست؛ تا اولین رندر سمت کلاینت صبر می‌کنیم تا
   // خروجی سرور و کلاینت یکی بماند (جلوگیری از hydration mismatch).
   useEffect(() => setReady(true), []);
 
-  const onUnauthorized = useCallback(() => setNeedsLogin(true), []);
-  const onLoggedIn = useCallback(() => setNeedsLogin(false), []);
+  const onUnauthorized = useCallback(() => {
+    setNeedsLogin(true);
+    setRejected(true);
+  }, []);
+  const onLoggedIn = useCallback(() => {
+    setNeedsLogin(false);
+    setRejected(false);
+  }, []);
 
-  return { needsLogin, ready, onUnauthorized, onLoggedIn };
+  return { needsLogin, rejected, ready, onUnauthorized, onLoggedIn };
 }

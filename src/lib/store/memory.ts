@@ -7,6 +7,7 @@ import type {
   Conversation,
   DateRange,
   DeleteResult,
+  DiscoveryCursor,
   Lead,
   LeadAnalysis,
   LeadFeedback,
@@ -55,6 +56,7 @@ type MemoryState = {
   feedback: LeadFeedback[];
   audit: AuditEntry[];
   conversations: Map<string, Conversation>; // key = leadId
+  discoveryCursors: Map<string, DiscoveryCursor>; // key = campaignId
 };
 
 const g = globalThis as typeof globalThis & { __mahdiyarCrmMemory?: MemoryState };
@@ -78,6 +80,7 @@ function state(): MemoryState {
       feedback: [],
       audit: [],
       conversations: new Map(),
+      discoveryCursors: new Map(),
     };
   }
   return g.__mahdiyarCrmMemory;
@@ -101,6 +104,15 @@ export class MemoryStore implements LeadStore {
     );
   }
 
+  /* ── مکان‌نمای کشف ── */
+  async getDiscoveryCursor(campaignId: string) {
+    return state().discoveryCursors.get(campaignId) ?? null;
+  }
+  async saveDiscoveryCursor(campaignId: string, cursor: DiscoveryCursor) {
+    state().discoveryCursors.set(campaignId, cursor);
+    return true;
+  }
+
   /* ── لیدها ── */
   async createLead(lead: Lead) {
     state().leads.set(lead.id, lead);
@@ -115,6 +127,21 @@ export class MemoryStore implements LeadStore {
   async findLeadByDedupKey(dedupKey: string) {
     for (const l of state().leads.values()) if (l.dedupKey === dedupKey) return l;
     return null;
+  }
+  /**
+   * قرینه‌ی دقیق نسخه‌ی Supabase — از جمله برگرداندن ردیف‌های حذف‌شده.
+   *
+   * چرا «قرینه‌ی دقیق» مهم است: اگر این نسخه حذف‌شده‌ها را نادیده بگیرد، کشف
+   * در dev رفتاری می‌دهد که در پروداکشن نمی‌دهد و باگ ضدرستاخیز فقط روی
+   * سرور دیده می‌شود — یعنی همان‌جایی که کشفش سخت‌ترین است.
+   */
+  async findExistingDedupKeys(keys: string[]) {
+    const want = new Set(keys);
+    const out = new Map<string, { id: string; deletedAt: string | null }>();
+    for (const l of state().leads.values()) {
+      if (want.has(l.dedupKey)) out.set(l.dedupKey, { id: l.id, deletedAt: l.deletedAt });
+    }
+    return out;
   }
   async listLeads(opts?: {
     campaignId?: string;

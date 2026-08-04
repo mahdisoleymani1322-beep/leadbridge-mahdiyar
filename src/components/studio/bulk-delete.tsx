@@ -165,6 +165,7 @@ export function DeleteBar({
   onDone,
   refocus,
   extraWarning,
+  onUnauthorized,
 }: {
   kind: TrashKind;
   /** شناسه‌های انتخاب‌شده‌ی **دیده‌شده** */
@@ -177,6 +178,8 @@ export function DeleteBar({
   refocus?: () => void;
   /** هشدار اختصاصی بخش — مثلاً اثر حذف پیام ارسال‌شده روی قیف */
   extraWarning?: string;
+  /** ۴۰۱ باید صفحه را به فرم ورود ببرد، نه اینکه بی‌صدا بمیرد */
+  onUnauthorized?: () => void;
 }) {
   const uid = useId();
   const panelId = `${uid}-confirm`;
@@ -220,7 +223,18 @@ export function DeleteBar({
       await onDone();
       refocus?.();
     } catch (e) {
-      if (e instanceof UnauthorizedError) throw e;
+      /*
+        ۴۰۱ قبلاً `throw e` می‌شد — به هیچ‌جا. صداکننده `onClick={() => void run()}`
+        است، پس استثنا به یک unhandled rejection تبدیل می‌شد که هیچ‌کس نمی‌گرفت:
+        نه فرم ورود می‌آمد، نه پیامی گفته می‌شد، نه حالت armed پاک می‌شد. از دید
+        کاربر دکمه‌ی «بله، حذف کن» فقط از کار می‌افتاد.
+      */
+      if (e instanceof UnauthorizedError) {
+        setArmed(false);
+        if (onUnauthorized) onUnauthorized();
+        else say("نشست منقضی شد. صفحه را تازه کن و دوباره وارد شو.");
+        return;
+      }
       say(`حذف ناموفق بود: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);

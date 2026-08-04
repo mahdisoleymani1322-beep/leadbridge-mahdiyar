@@ -1,7 +1,6 @@
 import "server-only";
-import { randomUUID, createHash } from "crypto";
+import { randomUUID } from "crypto";
 import { getStore, type Lead, type LeadAnalysis, type LeadStatus } from "@/lib/store";
-import { MAX_STEPS_PER_LEAD } from "@/lib/config";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
 import { runLeadAnalysis } from "./lead-analysis";
 import { scoreAffluence } from "./affluence";
@@ -12,7 +11,12 @@ import { runMessageWriter } from "./message-writer";
 import { runMessageCritic } from "./message-critic";
 import { recordLessonsFromCritic } from "./lesson-writer";
 import { checkPolicy } from "./policy-guard";
-import { CRITIC_THRESHOLDS, MAX_REVISION_ROUNDS, AFFLUENCE_THRESHOLDS } from "@/lib/config";
+import {
+  CRITIC_THRESHOLDS,
+  MAX_REVISION_ROUNDS,
+  AFFLUENCE_THRESHOLDS,
+  PIPELINE_GUARDS,
+} from "@/lib/config";
 import type { Message } from "@/lib/store";
 import type { LeadAnalysisOutput, ServiceMatchOutput, PortfolioSelectOutput } from "./types";
 
@@ -28,23 +32,17 @@ import type { LeadAnalysisOutput, ServiceMatchOutput, PortfolioSelectOutput } fr
  *   → اگر PASS: انتخاب خدمت (ایجنت) → انتخاب نمونه‌کار (ایجنت) → READY_FOR_MESSAGE
  *   → اگر NURTURE/REJECT: همان‌جا توقف
  *
- * گاردریل‌های حلقه (نقشه‌راه §32):
- * - سقف MAX_STEPS_PER_LEAD گام در هر اجرا
- * - هر گام حداکثر یک فراخوان مدل
- * - جلوگیری از اجرای تکراری با ورودی یکسان (input hash)
- * - توقف اجباری بعد از ۲ خطای متوالی
+ * گاردریل‌ها:
+ * - هر گام حداکثر یک فراخوان مدل (ساختاری: هر گام با return تمام می‌شود)
+ * - قفل همزمانی کهنه‌شونده روی وضعیت ANALYZING
+ * - سقف درخواست upstream در `ai.ts` (AI_LIMITS)
+ * - سقف گام در حلقه‌ی صداکننده (route یا کلاینت)
  * - هر گام با stop_reason در agent_runs ثبت می‌شود
+ *
+ * سه گاردریل قدیمی («هش ورودی تکراری»، «۲ خطای متوالی»، سقف گام داخلی) با
+ * حذف `runLeadPipeline` رفتند — هر سه در آن تابع بودند و هیچ‌کدام در شکل
+ * واقعی‌اش قابل‌رسیدن نبود. شرحش پایین‌تر، جایی که تابع بود.
  */
-
-const MAX_CONSECUTIVE_ERRORS = 2;
-
-export type PipelineResult = {
-  leadId: string;
-  finalStatus: LeadStatus;
-  steps: { agent: string; status: "done" | "error" | "skipped"; summary: string }[];
-  score: number | null;
-  stopReason: string;
-};
 
 /* ── اجرای گام‌به‌گام (برای اتصال‌های کند/ناپایدار) ──────────
  *
@@ -84,10 +82,16 @@ export type StepResult = {
  * بعد از این مدت، قفل ANALYZING «کهنه» حساب می‌شود و لید دوباره قابل پردازش است.
  *
  * سقف اجرای تابع روی Vercel ۶۰ ثانیه است، پس هیچ اجرای سالمی بیشتر از آن قفل
- * را نگه نمی‌دارد؛ ۳ دقیقه حاشیه‌ی امن می‌دهد بدون اینکه لیدِ واقعاً گیرکرده
- * ساعت‌ها بلااستفاده بماند.
+ * را نگه نمی‌دارد.
+ *
+ * از ۳ دقیقه به مقدار config کوتاه شد چون در عمل برعکس کار می‌کرد: اگر اجرا
+ * بیرون از پروسه بمیرد (تایم‌اوت Vercel، قطع اتصال)، rollback هرگز اجرا نمی‌شود
+ * و لید تا پایان مهلت یخ می‌زند. از دید مالک این یعنی «دکمه را می‌زنم و هیچ
+ * اتفاقی نمی‌افتد» — بدترین حالت ممکن، چون گاردی که برای صرفه‌جویی گذاشته شده
+ * بود خودش کار را متوقف می‌کرد. ۴۵ ثانیه هنوز از سقف ۶۰ ثانیه‌ای Vercel کمتر
+ * است ولی کمی بعد از آن، پس اجرای سالم را قطع نمی‌کند.
  */
-const STALE_LOCK_MS = 3 * 60 * 1000;
+const STALE_LOCK_MS = PIPELINE_GUARDS.staleLockMs;
 
 export async function runLeadStep(
   leadId: string,
@@ -96,8 +100,6 @@ export async function runLeadStep(
   const store = getStore();
   const lead = await store.getLead(leadId);
   if (!lead) throw new Error("لید یافت نشد.");
-  // همان گارد runLeadStep — شرحش آنجاست
-  if (lead.deletedAt) throw new Error("این لید حذف شده است.");
   /*
     گارد لید حذف‌شده — `getLead` عمداً ردیف‌های حذف‌شده را هم برمی‌گرداند (چون
     بازگردانی به آن نیاز دارد)، پس چک باید اینجا باشد. بدون این، یک درخواست با
@@ -186,7 +188,13 @@ export async function runLeadStep(
       lead.affluenceSignals = aff.signals;
     }
 
-    if (!opts.force && (lead.affluenceScore ?? 0) < AFFLUENCE_THRESHOLDS.analyze) {
+    /*
+      آستانه‌ی صفر یعنی دروازه خاموش است (تصمیم مالک — شرح کامل در config).
+      شرط صریح `> 0` لازم است وگرنه لیدی با نمره‌ی ۰ حتی با دروازه‌ی خاموش هم
+      رد می‌شد، چون `0 < 0` غلط است ولی مقایسه‌ی مرزی به‌راحتی از قلم می‌افتد.
+    */
+    const gateOn = AFFLUENCE_THRESHOLDS.analyze > 0;
+    if (gateOn && !opts.force && (lead.affluenceScore ?? 0) < AFFLUENCE_THRESHOLDS.analyze) {
       await store.updateLead(leadId, { status: "LOW_VALUE" });
       await logRun(
         "affluence-gate",
@@ -570,206 +578,18 @@ export async function runLeadStep(
   return { leadId, ran: "none", status: lead.status, score: lead.score, done: true, summary: "گام دیگری لازم نیست." };
 }
 
-/** هش ورودی — برای جلوگیری از تکرار یک ایجنت با ورودی یکسان */
-function inputHash(agent: string, payload: unknown): string {
-  return createHash("sha1").update(agent + JSON.stringify(payload)).digest("hex").slice(0, 16);
-}
 
-export async function runLeadPipeline(leadId: string): Promise<PipelineResult> {
-  const store = getStore();
-  const lead = await store.getLead(leadId);
-  if (!lead) throw new Error("لید یافت نشد.");
+/*
+  runLeadPipeline اینجا بود و حذف شد (~۲۰۰ خط).
 
-  // بیرون از closure گرفته می‌شود: `step` یک function declaration هوست‌شده است و
-  // TypeScript نمی‌تواند تضمین کند بعد از چکِ null بالا اجرا می‌شود، پس narrowing
-  // را از دست می‌دهد.
-  const runCampaignId = lead.campaignId;
+  یک پیاده‌سازی موازی از همین جریان بود که **هیچ صداکننده‌ای در UI نداشت** و
+  چهار گارد runLeadStep را نداشت: لید حذف‌شده، قفل همزمانی، دروازه‌ی توان مالی،
+  و بازگردانی وضعیت روی خطا. یعنی تنها مسیر باقی‌مانده برای اجرای بی‌گارد بود.
 
-  const steps: PipelineResult["steps"] = [];
-  const seenHashes = new Set<string>();
-  let stepCount = 0;
-  let consecutiveErrors = 0;
-  let stopReason = "completed";
+  سه گارد اختصاصی خودش هم در عمل غیرقابل‌رسیدن بودند: سقف ۱۰ گام در حالی که
+  حداکثر ۳ گام اجرا می‌شد، هش ورودی تکراری در حالی که هر ایجنت یک بار صدا
+  زده می‌شد، و شمارنده‌ی خطای متوالی که هیچ‌جا خوانده نمی‌شد.
 
-  /** اجرای یک گام با ثبت کامل در agent_runs (قابل‌ممیزی) */
-  async function step<T>(
-    agent: string,
-    hashPayload: unknown,
-    fn: () => Promise<{ output: T; summary: string }>
-  ): Promise<T | null> {
-    // گاردریل ۱: سقف گام
-    if (stepCount >= MAX_STEPS_PER_LEAD) {
-      stopReason = "MAX_STEPS";
-      steps.push({ agent, status: "skipped", summary: "سقف گام‌های مجاز پر شد." });
-      return null;
-    }
-    // گاردریل ۲: ورودی تکراری
-    const h = inputHash(agent, hashPayload);
-    if (seenHashes.has(h)) {
-      stopReason = "DUPLICATE_INPUT";
-      steps.push({ agent, status: "skipped", summary: "ورودی تکراری — از اجرای دوباره جلوگیری شد." });
-      return null;
-    }
-    seenHashes.add(h);
-    stepCount++;
+  جایگزینش یک حلقه‌ی کراندار روی runLeadStep در api/pipeline/route.ts است.
+*/
 
-    const started = Date.now();
-    try {
-      const { output, summary } = await fn();
-      consecutiveErrors = 0;
-      steps.push({ agent, status: "done", summary });
-      await store.addAgentRun({
-        id: randomUUID(),
-        leadId,
-        campaignId: runCampaignId,
-        agentName: agent,
-        status: "done",
-        summary,
-        output,
-        tokenInput: null,
-        tokenOutput: null,
-        cost: null,
-        durationMs: Date.now() - started,
-        stopReason: "ok",
-        errorCode: null,
-        createdAt: new Date().toISOString(),
-        deletedAt: null,
-        deletedBatch: null,
-      });
-      return output;
-    } catch (err) {
-      consecutiveErrors++;
-      const message = err instanceof Error ? err.message : String(err);
-      steps.push({ agent, status: "error", summary: message });
-      await store.addAgentRun({
-        id: randomUUID(),
-        leadId,
-        campaignId: runCampaignId,
-        agentName: agent,
-        status: "error",
-        summary: message,
-        output: null,
-        tokenInput: null,
-        tokenOutput: null,
-        cost: null,
-        durationMs: Date.now() - started,
-        stopReason: "error",
-        errorCode: message.slice(0, 80),
-        createdAt: new Date().toISOString(),
-        deletedAt: null,
-        deletedBatch: null,
-      });
-      // گاردریل ۳: توقف بعد از ۲ خطای متوالی
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) stopReason = "CONSECUTIVE_ERRORS";
-      return null;
-    }
-  }
-
-  async function setStatus(status: LeadStatus, patch: Partial<Lead> = {}) {
-    await store.updateLead(leadId, { status, ...patch });
-  }
-
-  // ── ۱. تحلیل (ایجنت) ──
-  await setStatus("ANALYZING");
-
-  // غنی‌سازی اختیاری اینستاگرام (سرویس قطعی، صفر توکن)
-  const igProfile =
-    isInstagramConfigured() && lead.instagramHandle
-      ? await businessDiscovery(lead.instagramHandle)
-      : null;
-
-  const analysis = await step<LeadAnalysisOutput>("lead-analysis", { id: lead.id }, async () => {
-    const out = await runLeadAnalysis({ lead, igProfile });
-    return {
-      output: out,
-      summary: `درد: ${out.painPoint.slice(0, 80)}… (اطمینان ${Math.round(out.confidence * 100)}٪)`,
-    };
-  });
-
-  if (!analysis) {
-    await setStatus("NEW");
-    return { leadId, finalStatus: "NEW", steps, score: null, stopReason: stopReason || "ANALYSIS_FAILED" };
-  }
-
-  // ذخیره‌ی تحلیل
-  const analysisRow: LeadAnalysis = {
-    id: randomUUID(),
-    leadId,
-    businessSummary: analysis.businessSummary,
-    targetCustomer: analysis.targetCustomer,
-    painPoint: analysis.painPoint,
-    needSignals: analysis.needSignals,
-    evidence: analysis.evidence,
-    uncertainties: analysis.uncertainties,
-    brandTone: analysis.brandTone,
-    recommendedService: "",
-    riskFlags: analysis.riskFlags,
-    confidence: analysis.confidence,
-    agentVersion: "v1",
-    createdAt: new Date().toISOString(),
-  };
-  await store.upsertAnalysis(analysisRow);
-
-  // ── ۲. امتیازدهی (سرویس قطعی — صفر توکن) ──
-  const pipelineCampaign = lead.campaignId ? await store.getCampaign(lead.campaignId) : null;
-  const scoreResult: ScoreResult = scoreLead(lead, analysis, pipelineCampaign?.market ?? null);
-  await setStatus("SCORED", { score: scoreResult.score, confidence: analysis.confidence });
-  steps.push({ agent: "scoring", status: "done", summary: scoreResult.reason });
-
-  if (scoreResult.decision !== "PASS") {
-    const finalStatus: LeadStatus = scoreResult.decision === "NURTURE" ? "NURTURE" : "REJECTED";
-    await setStatus(finalStatus);
-    return { leadId, finalStatus, steps, score: scoreResult.score, stopReason: scoreResult.decision };
-  }
-
-  // ── ۳. انتخاب خدمت (ایجنت) ──
-  const match = await step<ServiceMatchOutput>(
-    "service-match",
-    { id: lead.id, pain: analysis.painPoint },
-    async () => {
-      const out = await runServiceMatch({ businessName: lead.businessName, analysis });
-      return { output: out, summary: `خدمت: ${out.serviceId} — ${out.reason.slice(0, 60)}…` };
-    }
-  );
-
-  if (match) {
-    await store.upsertAnalysis({ ...analysisRow, recommendedService: match.serviceId });
-  }
-
-  // ── ۴. انتخاب نمونه‌کار (ایجنت) ──
-  let portfolio: PortfolioSelectOutput | null = null;
-  if (match) {
-    const items = await store.listPortfolio({ approvedOnly: true });
-    portfolio = await step<PortfolioSelectOutput>(
-      "portfolio-select",
-      { id: lead.id, service: match.serviceId },
-      async () => {
-        const out = await runPortfolioSelect({
-          businessName: lead.businessName,
-          industry: lead.industry,
-          painPoint: analysis.painPoint,
-          serviceId: match.serviceId,
-          portfolio: items,
-        });
-        return {
-          output: out,
-          summary: out.selectedIds.length
-            ? `${out.selectedIds.length} نمونه‌کار پیشنهاد شد`
-            : "نمونه‌کار مرتبطی نبود",
-        };
-      }
-    );
-  }
-
-  // ── ۵. آماده برای پیام (فاز ۴) ──
-  const finalStatus: LeadStatus = match ? "READY_FOR_MESSAGE" : "SCORED";
-  await setStatus(finalStatus);
-
-  return {
-    leadId,
-    finalStatus,
-    steps,
-    score: scoreResult.score,
-    stopReason: portfolio || match ? stopReason : "PARTIAL",
-  };
-}

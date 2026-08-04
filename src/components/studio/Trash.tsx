@@ -44,8 +44,8 @@ const KIND_TITLE: Record<TrashKind, string> = {
  * رفع کرد؛ صفحه‌ی تازه باید از روز اول رعایتش کند.
  */
 export function Trash() {
-  const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
-  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} />;
+  const { needsLogin, rejected, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
+  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} rejected={rejected} />;
   return <TrashInner onUnauthorized={onUnauthorized} />;
 }
 
@@ -113,7 +113,7 @@ function TrashInner({ onUnauthorized }: { onUnauthorized: () => void }) {
           id="trash-heading"
           ref={headingRef}
           tabIndex={-1}
-          className="mb-2 text-lg font-extrabold text-ink"
+          className="mb-2 text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
         >
           موارد حذف‌شده {batches ? `(${fa(batches.length)} دسته)` : ""}
         </h2>

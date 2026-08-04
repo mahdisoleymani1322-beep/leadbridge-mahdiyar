@@ -139,8 +139,8 @@ const STATE_LABELS: Record<string, string> = {
  * بدنه‌ای که هوک‌های بعدی دارد، قانون هوک‌ها را می‌شکند.)
  */
 export function Crm() {
-  const { needsLogin, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
-  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} />;
+  const { needsLogin, rejected, ready, onUnauthorized, onLoggedIn } = useStudioAuth();
+  if (ready && needsLogin) return <StudioLogin onSaved={onLoggedIn} rejected={rejected} />;
   return <CrmInner onUnauthorized={onUnauthorized} />;
 }
 
@@ -164,21 +164,37 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
     []
   );
 
+  /**
+   * @param range بازه‌ی صریح — برای دکمه‌های پیش‌تنظیم.
+   *
+   * چرا لازم است: `load` روی `from`/`to` بسته شده. دکمه‌های «۷ روز / ۳۰ روز /
+   * ۹۰ روز» فقط `setFrom`/`setTo` می‌زدند و چیزی صدا نمی‌کردند؛ حتی اگر
+   * صدا می‌زدند، همان لحظه هنوز مقدار قدیمی داخل closure بود. نتیجه این بود
+   * که دکمه‌ها `aria-pressed` را عوض می‌کردند و تاریخ زیرشان تغییر می‌کرد ولی
+   * **هیچ داده‌ای بارگذاری نمی‌شد** — قیف و آمار و دفترچه‌ی تصمیم همان بازه‌ی
+   * قبلی می‌ماندند تا وقتی کاربر جدا «نمایش بازه» را بزند.
+   */
   const load = useCallback(
-    async (announce: boolean) => {
+    async (
+      announce: boolean,
+      range?: { from?: string; to?: string; campaignId?: string }
+    ) => {
+      const f = range?.from ?? from;
+      const t = range?.to ?? to;
+      const c = range?.campaignId ?? campaignId;
       setBusy(true);
       setError("");
       try {
-        const q = new URLSearchParams({ from: startIso(from), to: endIso(to) });
-        if (campaignId) q.set("campaignId", campaignId);
+        const q = new URLSearchParams({ from: startIso(f), to: endIso(t) });
+        if (c) q.set("campaignId", c);
         // قبلاً fetch خام بود و هدر رمز نمی‌فرستاد؛ یعنی لحظه‌ای که
         // STUDIO_PASSWORD تنظیم می‌شد، کل صفحه‌ی CRM با ۴۰۱ می‌مرد.
         const json = await apiFetch<CrmData>(`/api/crm?${q}`);
         setData(json);
         if (announce) {
           setStatus(
-            `${fa(json.totals.events)} رویداد در بازه‌ی ${jalali(startIso(from))} تا ${jalali(
-              startIso(to)
+            `${fa(json.totals.events)} رویداد در بازه‌ی ${jalali(startIso(f))} تا ${jalali(
+              startIso(t)
             )} یافت شد.`
           );
         }
@@ -222,8 +238,12 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
   }, [shown]);
 
   const preset = (days: number) => {
-    setFrom(daysAgo(days));
-    setTo(ymd(new Date()));
+    const f = daysAgo(days);
+    const t = ymd(new Date());
+    setFrom(f);
+    setTo(t);
+    // بازه صریح پاس داده می‌شود چون state هنوز به‌روز نشده
+    void load(true, { from: f, to: t });
   };
   const activePreset = (days: number) => from === daysAgo(days) && to === ymd(new Date());
 
@@ -286,7 +306,12 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
               <select
                 id="crm-campaign"
                 value={campaignId}
-                onChange={(e) => setCampaignId(e.target.value)}
+                onChange={(e) => {
+                  // مثل پیش‌تنظیم‌های تاریخ: عوض‌کردن state به‌تنهایی هیچ داده‌ای
+                  // نمی‌آورد و کاربر فکر می‌کند فیلتر اعمال شده
+                  setCampaignId(e.target.value);
+                  void load(true, { campaignId: e.target.value });
+                }}
                 className="rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-ink"
               >
                 <option value="">همه‌ی کمپین‌ها</option>
@@ -456,7 +481,7 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
             id="follow-heading"
             ref={followHeadingRef}
             tabIndex={-1}
-            className="mb-2 text-lg font-extrabold text-ink"
+            className="mb-2 text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
           >
             پیگیری‌ها ({fa(data.followUps.length)} لید ارسال‌شده)
           </h2>
@@ -508,6 +533,7 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
                     say={setStatus}
                     selected={f.conversationId ? convSel.selected.has(f.conversationId) : false}
                     onToggle={f.conversationId ? () => convSel.toggle(f.conversationId!) : null}
+                    onUnauthorized={onUnauthorized}
                   />
                 ))}
               </ul>
@@ -517,7 +543,7 @@ function CrmInner({ onUnauthorized }: { onUnauthorized: () => void }) {
       )}
 
       {/* ── درس‌های آموخته‌شده ── */}
-      <Lessons say={setStatus} />
+      <Lessons say={setStatus} onUnauthorized={onUnauthorized} />
 
       {/* ── دفترچه‌ی تصمیم ── */}
       {data && (
@@ -613,7 +639,13 @@ type LessonRow = {
  * بدون این بخش، سیستم بی‌سروصدا روی پیام‌های بعدی اثر می‌گذاشت و مالک نه
  * می‌دید چه یاد گرفته شده و نه می‌توانست درسِ غلط را پس بگیرد.
  */
-function Lessons({ say }: { say: (t: string) => void }) {
+function Lessons({
+  say,
+  onUnauthorized,
+}: {
+  say: (t: string) => void;
+  onUnauthorized: () => void;
+}) {
   const [rows, setRows] = useState<LessonRow[] | null>(null);
   const [err, setErr] = useState("");
   const lessonSel = useBulkSelect();
@@ -624,9 +656,11 @@ function Lessons({ say }: { say: (t: string) => void }) {
       const j = await apiFetch<{ lessons: LessonRow[] }>("/api/lessons");
       setRows(j.lessons);
     } catch (e) {
+      // ۴۰۱ باید فرم ورود بیاورد، نه یک خط قرمز کوچک زیر فهرست درس‌ها
+      if (e instanceof UnauthorizedError) return onUnauthorized();
       setErr(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [onUnauthorized]);
 
   useEffect(() => {
     void load();
@@ -641,6 +675,7 @@ function Lessons({ say }: { say: (t: string) => void }) {
       say("درس غیرفعال شد و دیگر به پرامپت تزریق نمی‌شود.");
       await load();
     } catch (e) {
+      if (e instanceof UnauthorizedError) return onUnauthorized();
       say(`غیرفعال‌کردن درس ناموفق بود: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
@@ -651,7 +686,7 @@ function Lessons({ say }: { say: (t: string) => void }) {
         id="lessons-heading"
         ref={headingRef}
         tabIndex={-1}
-        className="mb-2 text-lg font-extrabold text-ink"
+        className="mb-2 text-lg font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
       >
         درس‌های آموخته‌شده {rows ? `(${fa(rows.length)})` : ""}
       </h2>
@@ -737,6 +772,7 @@ function FollowUpCard({
   say,
   selected,
   onToggle,
+  onUnauthorized,
 }: {
   f: FollowUp;
   onSaved: () => void;
@@ -744,6 +780,7 @@ function FollowUpCard({
   selected: boolean;
   /** null یعنی این کارت پاسخ ثبت‌شده ندارد و چیزی برای حذف نیست */
   onToggle: (() => void) | null;
+  onUnauthorized: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState(f.conversationState ?? "no_reply");
@@ -783,6 +820,7 @@ function FollowUpCard({
       headingRef.current?.focus();
       onSaved();
     } catch (e) {
+      if (e instanceof UnauthorizedError) return onUnauthorized();
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -811,7 +849,11 @@ function FollowUpCard({
             id={headId}
             ref={headingRef}
             tabIndex={-1}
-            className="flex-1 text-sm font-extrabold text-ink outline-none"
+            /* `outline-none` نبود؛ بعد از ثبت پاسخ، فوکوس برنامه‌ای به همین
+               سرتیتر می‌آید و کاربر صفحه‌کلید هیچ نشانه‌ی دیداری نمی‌دید که
+               فوکوس کجا رفته (نقض ۲.۴.۷). brass-dark نه brass — روی این
+               پس‌زمینه نسبت کنتراست لازم را می‌دهد. */
+            className="flex-1 text-sm font-extrabold text-ink focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-brass-dark"
           >
             {f.businessName}
           </h3>

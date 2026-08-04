@@ -13,6 +13,10 @@ create table if not exists campaigns (
   daily_discovery_limit int  not null default 20,
   daily_message_limit   int  not null default 5,
   status                text not null default 'active' check (status in ('active','paused')),
+  -- مکان‌نمای پیشرفت کشف (مهاجرت ۷) — بدون آن هر «کشف لید» دقیقاً همان ۲۰
+  -- کسب‌وکار قبلی را برمی‌گرداند. شکل داده: DiscoveryCursor در store/types.ts.
+  -- دلیل کامل در supabase/migrations/007_discovery_cursor.sql.
+  discovery_cursor      jsonb,
   created_at            timestamptz not null default now()
 );
 

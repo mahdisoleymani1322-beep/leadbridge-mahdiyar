@@ -30,6 +30,16 @@ h1, h2, h3, h4, h5, h6 {
   background: theme("colors.sand");
 }
 
+/*
+  هدر صفحه `sticky top-0` با ارتفاع ~۶۴px است. بدون این، هر عنصری که با Tab
+  یا با فوکوس برنامه‌ای درست زیر لبه‌ی دید باشد، پشت هدر می‌رود و کاربر
+  صفحه‌کلید نمی‌بیند فوکوس کجاست (WCAG 2.4.11 — Focus Not Obscured).
+  یک خط، همه‌ی صفحه‌ها.
+*/
+html {
+  scroll-padding-top: 4.5rem;
+}
+
 /* احترام به prefers-reduced-motion */
 @media (prefers-reduced-motion: reduce) {
   *,

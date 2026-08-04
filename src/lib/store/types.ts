@@ -82,6 +82,49 @@ export type Campaign = {
   createdAt: string;
 } & SoftDeleteFields;
 
+/**
+ * مکان‌نمای پیشرفت کشف — «اجرای قبل تا کجا رفت».
+ *
+ * چرا وجود دارد: تا قبل از این، `runDiscovery(campaignId)` یک تابع خالص از
+ * (بازار، شهر، سقف) بود. اجرای N+1 هیچ خبری از اجرای N نداشت، و چون هیچ‌کدام
+ * از منابع ترتیب تصادفی ندارند (Overpass اصلاً OFFSET ندارد، نقشه‌ی جست‌وجو
+ * همیشه از plan[0] شروع می‌شد)، **هر فشردن دکمه دقیقاً همان ۲۰ کسب‌وکار قبلی
+ * را می‌آورد**. مالک ۲۰ تکراری و ۰ لید تازه می‌دید.
+ *
+ * عمداً روی خود ردیف کمپین به‌صورت jsonb ذخیره می‌شود، نه یک جدول جدا:
+ * رابطه ۱:۱ است، در هر اجرا فقط یک‌بار خوانده و یک‌بار نوشته می‌شود، و هیچ‌وقت
+ * فیلتر/join نمی‌شود. جزئیات در `supabase/migrations/007_discovery_cursor.sql`.
+ *
+ * `v` نسخه‌ی شکل داده است: اگر روزی فیلدها عوض شدند، مکان‌نمای قدیمی دور ریخته
+ * و از نو ساخته می‌شود — به‌مراتب بهتر از خواندن فیلدی که معنایش عوض شده.
+ *
+ * مرز جغرافیایی (`bbox`) عمداً **ساختاری** اینجا اعلام شده و از
+ * `integrations/openstreetmap` وارد نشده: لایه‌ی ذخیره‌سازی نباید به لایه‌ی
+ * یکپارچه‌سازی وابسته شود، وگرنه تعویض منبع نقشه، تایپ دیتابیس را می‌شکند.
+ */
+export type DiscoveryCursor = {
+  /** نسخه‌ی شکل داده — نسخه‌ی ناشناخته دور ریخته می‌شود */
+  v: 1;
+  /** شهر و بازارِ لحظه‌ی ساخت — اگر کمپین عوض شده باشد، مکان‌نما بی‌اعتبار است */
+  city: string;
+  market: string;
+  /** مرز شهر از Nominatim — کش می‌شود تا هر اجرا دوباره ژئوکد نکند */
+  bbox: { south: number; north: number; west: number; east: number } | null;
+  /** اندیس کاشی بعدیِ مرز شهر برای Overpass (در فهرست مرتب‌شده‌ی مرکز‌به‌بیرون) */
+  osmTile: number;
+  /** اندیس جفت بعدی در نقشه‌ی جست‌وجوی وب (Tavily) */
+  webPlan: number;
+  /** اندیس عبارت بعدی برای Google Places Text Search */
+  placesTermIndex: number;
+  /** توکن صفحه‌ی بعدی همان عبارت (اگر مانده باشد) */
+  placesPageToken: string | null;
+  /** اندیس جفت بعدی در نقشه‌ی جست‌وجوی Google Programmable Search */
+  googleSearchIndex: number;
+  /** چند دور کامل روی منابع زده شده — برای اطلاع مالک، نه برای منطق */
+  laps: number;
+  lastRunAt: string | null;
+};
+
 /* ── لید ─────────────────────────────────────────────────── */
 
 /** وضعیت لید — دقیقاً State Machine نقشه‌راه §10 */
@@ -381,11 +424,43 @@ export interface LeadStore {
   getCampaign(id: string): Promise<Campaign | null>;
   listCampaigns(): Promise<Campaign[]>;
 
+  /* ── مکان‌نمای کشف ──
+   *
+   * هر دو متد **هرگز throw نمی‌کنند**. دلیلش یک قاعده‌ی سخت است: مکان‌نما یک
+   * بهینه‌سازی است، نه داده‌ی حیاتی. اگر ستون `discovery_cursor` هنوز ساخته
+   * نشده باشد (مهاجرت ۷ اجرا نشده)، کشف باید کامل کار کند و فقط پیشرفت را
+   * تخمین بزند — نه اینکه کل دکمه‌ی «کشف لید» با ۵۰۰ بشکند.
+   */
+
+  /** مکان‌نمای کمپین، یا null اگر نبود/خطا داد */
+  getDiscoveryCursor(campaignId: string): Promise<DiscoveryCursor | null>;
+  /** ذخیره‌ی مکان‌نما. `false` یعنی ذخیره نشد (مثلاً ستون هنوز وجود ندارد). */
+  saveDiscoveryCursor(campaignId: string, cursor: DiscoveryCursor): Promise<boolean>;
+
   // لیدها
   createLead(lead: Lead): Promise<void>;
   updateLead(id: string, patch: Partial<Lead>): Promise<void>;
   getLead(id: string): Promise<Lead | null>;
   findLeadByDedupKey(dedupKey: string): Promise<Lead | null>;
+  /**
+   * چند کلید یکتا را **در یک رفت‌وبرگشت** بررسی می‌کند.
+   *
+   * چرا لازم شد: جریان کشف قبلاً به‌ازای هر نامزد یک `findLeadByDedupKey` جدا
+   * می‌زد — یعنی ۲۰ کوئری پشت‌سرهم. حالا که بررسی تکراری‌بودن باید **قبل از**
+   * برش سقف روزانه انجام شود (روی ~۸۰ نامزد به‌جای ۲۰)، ۸۰ رفت‌وبرگشت سریالی
+   * از بودجه‌ی ۴۵ ثانیه‌ای کشف چیزی باقی نمی‌گذاشت.
+   *
+   * ⚠️ دقیقاً مثل `findLeadByDedupKey`، ردیف‌های حذف‌شده را هم برمی‌گرداند —
+   * این همان مکانیزم ضدرستاخیزِ مهاجرت ۰۰۶ است. `deletedAt` در خروجی هست تا
+   * کشف بتواند «تکراری با ردیف زنده» را از «تکراری با ردیف سطل زباله» جدا
+   * گزارش کند؛ مالک باید بداند چند تا از تکراری‌ها همان‌هایی‌اند که خودش پاک
+   * کرده.
+   *
+   * @returns Map از کلید به شناسه‌ی لید. کلیدهای ناموجود در Map نیستند.
+   */
+  findExistingDedupKeys(
+    keys: string[]
+  ): Promise<Map<string, { id: string; deletedAt: string | null }>>;
   listLeads(opts?: {
     campaignId?: string;
     status?: LeadStatus;

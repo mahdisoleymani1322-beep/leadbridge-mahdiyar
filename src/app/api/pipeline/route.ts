@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { isStudioAuthorized, unauthorized } from "@/lib/auth";
 import { isConfigured } from "@/lib/ai";
-import { runLeadPipeline, runLeadStep } from "@/lib/agents/orchestrator";
+import { runLeadStep } from "@/lib/agents/orchestrator";
+import { MAX_STEPS_PER_LEAD } from "@/lib/config";
 import { scoreAffluence } from "@/lib/agents/affluence";
 import { AFFLUENCE_THRESHOLDS } from "@/lib/config";
 import { getStore } from "@/lib/store";
@@ -61,10 +62,30 @@ export async function POST(req: NextRequest) {
       return Response.json({ step, done: step.done });
     }
 
-    // حالت تکی — اجرای کامل تحلیل تا انتخاب نمونه‌کار (بدون گام پیام)
+    /*
+      حالت تکی بدون `step: true` — حلقه‌ی کراندار روی همان `runLeadStep`.
+
+      قبلاً اینجا `runLeadPipeline` بود: یک پیاده‌سازی موازیِ ۲۰۰ خطی از همین
+      جریان که **هیچ صداکننده‌ای در UI نداشت** و چهار گارد `runLeadStep` را هم
+      نداشت (لید حذف‌شده، قفل همزمانی، دروازه، بازگردانی وضعیت روی خطا). یعنی
+      تنها راهِ باقی‌مانده برای اجرای بی‌گارد، همین مسیر بود.
+
+      سه گارد اختصاصی خودش (سقف گام، هش ورودی تکراری، خطای متوالی) در عمل
+      **غیرقابل‌رسیدن** بودند: حداکثر ۳ گام اجرا می‌شد در حالی که سقف ۱۰ بود،
+      هر ایجنت یک بار صدا زده می‌شد پس هش هیچ‌وقت برخورد نمی‌کرد، و شمارنده‌ی
+      خطای متوالی اصلاً خوانده نمی‌شد.
+
+      روی `portfolio-select` می‌ایستد تا وارد فاز پیام نشود — همان مرزی که
+      نسخه‌ی قبلی داشت.
+    */
     if (typeof body.leadId === "string" && body.leadId) {
-      const result = await runLeadPipeline(body.leadId);
-      return Response.json({ results: [result] });
+      const steps = [];
+      for (let i = 0; i < MAX_STEPS_PER_LEAD; i++) {
+        const s = await runLeadStep(body.leadId, { force: body.force === true });
+        steps.push(s);
+        if (s.done || s.ran === "portfolio-select") break;
+      }
+      return Response.json({ steps, done: true });
     }
 
     // حالت کمپین — **یک گام** در هر درخواست.

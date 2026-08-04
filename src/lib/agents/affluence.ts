@@ -1,5 +1,6 @@
 import "server-only";
 import type { Lead, ChannelKey } from "@/lib/store/types";
+import { DISCOVERY } from "@/lib/config";
 
 /**
  * سیگنال توان مالی کسب‌وکار — **سرویس قطعی، صفر توکن LLM**.
@@ -133,6 +134,60 @@ function digits(v: string): string {
     .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
     .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
     .replace(/\D/g, "");
+}
+
+/**
+ * پیش‌رتبه‌بندی یک نامزد کشف — **پیش از** استخراج کانال‌ها، فقط از فیلدهایی که
+ * خودِ منبع داده است.
+ *
+ * چرا نوشته شد: `roughAffluence` در discovery.ts سنگین‌ترین وزنش روی
+ * `reviewsCount` و `rating` بود، ولی OSM و جست‌وجوی وب هر دو صریحاً این دو را
+ * `null` می‌گذارند. یعنی آن تابع عملاً به «سایت دارد؟ ۸ : ۰» فرو ریخته بود و
+ * چون `Array.sort` در V8 پایدار است، ترتیب حاصل **هر اجرا مو‌به‌مو یکسان**
+ * می‌شد. همان ترتیب تصمیم می‌گرفت کدام ۲۰ تا از ~۸۰ نامزد زنده بمانند، پس
+ * ۶۰ کسب‌وکار دیگر هرگز دیده نمی‌شدند.
+ *
+ * امتیاز نظرات و امتیاز گوگل حذف نشده‌اند، فقط دیگر تنها سیگنال نیستند؛ اگر
+ * روزی کلید Google Places اضافه شود خودبه‌خود دوباره وزن پیدا می‌کنند.
+ *
+ * عمداً در همین فایل است نه discovery.ts: `AFFLUENT_AREAS`، `FREE_HOSTS` و
+ * `SCALE_KEYWORDS` تعریف واحد «چه چیزی پولدار به نظر می‌رسد» هستند و دو نسخه
+ * شدنشان یعنی شش ماه دیگر یکی به‌روز می‌شود و دیگری نه.
+ */
+export function preRankPlace(p: {
+  name: string;
+  address: string | null;
+  phone: string | null;
+  website: string | null;
+  rating: number | null;
+  reviewsCount: number | null;
+  instagramHandle?: string | null;
+  seedChannels?: Partial<Record<ChannelKey, string>>;
+}): number {
+  const w = DISCOVERY.preRank;
+  let s = 0;
+
+  const host = hostOf(p.website);
+  if (host) {
+    const free = FREE_HOSTS.some((f) => host === f || host.endsWith("." + f) || host.includes(f));
+    s += free ? w.freeHostDomain : w.ownDomain;
+  }
+  if (p.phone) s += w.phone;
+  if (p.instagramHandle) s += w.instagram;
+  if (p.address) s += w.address;
+
+  // تگ‌های contact:* در OSM — نشانه‌ی اینکه کسب‌وکار خودش را جایی ثبت کرده
+  const seeds = p.seedChannels ? Object.values(p.seedChannels).filter(Boolean).length : 0;
+  s += Math.min(seeds, w.maxSeedChannels) * w.perSeedChannel;
+
+  if (SCALE_KEYWORDS.some((k) => p.name.includes(k))) s += w.scaleKeyword;
+  if (p.address && AFFLUENT_AREAS.some((a) => p.address!.includes(a))) s += w.affluentArea;
+
+  // فقط وقتی Google Places فعال باشد مقدار دارند
+  s += Math.min(w.reviewsCap, (p.reviewsCount ?? 0) / w.reviewsDivisor);
+  if (p.rating != null && p.rating >= w.highRatingAt) s += w.highRating;
+
+  return s;
 }
 
 /**

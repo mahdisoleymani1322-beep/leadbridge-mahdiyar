@@ -8,6 +8,7 @@ import type {
   Conversation,
   DateRange,
   DeleteResult,
+  DiscoveryCursor,
   Lead,
   LeadAnalysis,
   LeadFeedback,
@@ -20,6 +21,7 @@ import type {
   TrashBatch,
   TrashKind,
 } from "./types";
+import { DISCOVERY } from "@/lib/config";
 
 /**
  * ذخیره‌سازی Supabase — پروداکشن مهدیار. اسکیمای جدول‌ها در supabase/schema.sql.
@@ -415,6 +417,30 @@ function conversationFromRow(r: any): Conversation {
   };
 }
 
+/* ── مکان‌نمای کشف: سازگاری با دیتابیسی که مهاجرت ۷ را نخورده ──────── */
+
+/**
+ * حافظه‌ی «ستون `discovery_cursor` هنوز ساخته نشده».
+ *
+ * قانون دیپلوی پروژه «اول SQL بعد پوش» است، ولی کشف نباید به رعایت‌شدنش گره
+ * بخورد. بدون این فلگ، هر اجرای کشف یک رفت‌وبرگشتِ محکوم‌به‌شکست خرج می‌کند.
+ *
+ * با ری‌استارت لامبدا صفر می‌شود — و این دقیقاً رفتار درست است: بعد از اجرای
+ * مهاجرت، اولین اینستنس تازه خودبه‌خود دوباره امتحان می‌کند و نیازی به دیپلوی
+ * مجدد نیست.
+ */
+let cursorColumnMissing = false;
+
+/** 42703 = undefined_column · PGRST204 = ستون در کش اسکیمای PostgREST نیست */
+function isMissingCursorColumn(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  return (
+    err.code === "42703" ||
+    err.code === "PGRST204" ||
+    /discovery_cursor/i.test(err.message ?? "")
+  );
+}
+
 /* ── پیاده‌سازی ─────────────────────────────────────────── */
 
 export class SupabaseStore implements LeadStore {
@@ -440,6 +466,38 @@ export class SupabaseStore implements LeadStore {
       .order("created_at", { ascending: false });
     if (error) throw new Error(`خواندن کمپین‌ها ناموفق بود: ${error.message}`);
     return (data ?? []).map(campaignFromRow);
+  }
+
+  /* مکان‌نمای کشف — عمداً بیرون از campaignToRow/campaignFromRow.
+     اگر وارد آن مپرها می‌شد، `insert` در createCampaign روی دیتابیسی که
+     مهاجرت ۷ را نخورده کامل می‌شکست. جداکردنش تنها چیزی است که مسیر
+     سازگاری پایین را ممکن می‌کند. */
+  async getDiscoveryCursor(campaignId: string): Promise<DiscoveryCursor | null> {
+    if (cursorColumnMissing) return null;
+    const { data, error } = await client()
+      .from("campaigns")
+      .select("discovery_cursor")
+      .eq("id", campaignId)
+      .maybeSingle();
+    if (error) {
+      if (isMissingCursorColumn(error)) cursorColumnMissing = true;
+      return null; // خواندن مکان‌نما هرگز نباید کشف را بترکاند
+    }
+    const raw = (data as { discovery_cursor?: unknown } | null)?.discovery_cursor;
+    return raw && typeof raw === "object" ? (raw as DiscoveryCursor) : null;
+  }
+
+  async saveDiscoveryCursor(campaignId: string, cursor: DiscoveryCursor): Promise<boolean> {
+    if (cursorColumnMissing) return false;
+    const { error } = await client()
+      .from("campaigns")
+      .update({ discovery_cursor: cursor })
+      .eq("id", campaignId);
+    if (error) {
+      if (isMissingCursorColumn(error)) cursorColumnMissing = true;
+      return false;
+    }
+    return true;
   }
 
   /* لیدها */
@@ -474,6 +532,32 @@ export class SupabaseStore implements LeadStore {
       .eq("dedup_key", dedupKey)
       .maybeSingle();
     return data ? leadFromRow(data) : null;
+  }
+  /**
+   * نسخه‌ی دسته‌ای — شرح کامل «چرا» در تعریف اینترفیس (store/types.ts).
+   *
+   * تکه‌تکه فرستادن اجباری است: PostgREST فیلتر `in.(…)` را در query-string
+   * می‌فرستد، پس یک لیست بلند به سقف طول URL می‌خورد و کل کشف با یک خطای
+   * نامفهوم شبکه می‌ایستد.
+   *
+   * ⚠️ مثل `findLeadByDedupKey` بالا، `deleted_at is null` عمداً اینجا نیست.
+   */
+  async findExistingDedupKeys(keys: string[]) {
+    const out = new Map<string, { id: string; deletedAt: string | null }>();
+    if (keys.length === 0) return out;
+    const uniq = Array.from(new Set(keys));
+    for (let i = 0; i < uniq.length; i += DISCOVERY.dedupKeyChunk) {
+      const chunk = uniq.slice(i, i + DISCOVERY.dedupKeyChunk);
+      const { data, error } = await client()
+        .from("leads")
+        .select("id, dedup_key, deleted_at")
+        .in("dedup_key", chunk);
+      if (error) throw new Error(`بررسی کلیدهای تکراری ناموفق بود: ${error.message}`);
+      for (const r of (data ?? []) as { id: string; dedup_key: string; deleted_at: string | null }[]) {
+        out.set(r.dedup_key, { id: r.id, deletedAt: r.deleted_at ?? null });
+      }
+    }
+    return out;
   }
   async listLeads(opts?: {
     campaignId?: string;
