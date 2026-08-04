@@ -178,22 +178,28 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // لیدهای نیمه‌تمام اولویت دارند تا کار رهاشده نماند:
-      //   SCORED            → گام خدمت/نمونه‌کار مانده
-      //   READY_FOR_MESSAGE → گام تولید پیام مانده (فاز ۴)
-      // بعد سراغ لید تحلیل‌نشده‌ی بعدی می‌رویم.
+      /*
+        ترتیب صف: **اول همه‌ی کارِ تحلیل، بعد کارِ پیام.**
+
+        باگی که این رفع می‌کند (اجرای زنده‌ی ۱۴ مرداد): ترتیب قبلی
+        `scored ?? readyForMessage ?? fresh` بود، یعنی لیدی که تحلیلش تمام شده
+        و منتظر پیام است بر لید تحلیل‌نشده **مقدم** می‌شد. مالک «تحلیل همه‌ی
+        لیدهای منتخب» را زد با ۴ لید تحلیل‌نشده؛ یک لید با نمره‌ی منتقد ۸۲ وسط
+        دور بازنویسی پارک بود (۸۲ < pass=۸۵ و دور ۱ از ۲، پس وضعیتش
+        READY_FOR_MESSAGE می‌ماند و از صف خارج نمی‌شود). نتیجه: هر گام صرف
+        بازنویسی پیامِ همان یک لید شد و سه لید NEW هرگز نوبت نگرفتند. چون
+        شمارنده‌ی کلاینت فقط `ran === "analysis"` را می‌شمارد، گزارش نهایی
+        «۱ لید تحلیل شد» بود — دقیقاً همان چیزی که مالک دید.
+
+        این ترتیب با متن خود دکمه هم هم‌خوان است: «اول تحلیل همه را بزن، بعد
+        از تمام‌شدنش دکمه‌ی تولید پیام فعال می‌شود».
+
+        READY_FOR_MESSAGE فقط **وقتی هیچ کار تحلیلی نمانده** خوانده می‌شود —
+        هم یک رفت‌وبرگشت دیتابیس کمتر، هم تضمین اینکه هرگز جلوی تحلیل را نگیرد.
+      */
       const scored = pickScope(
         await store.listLeads({ campaignId: body.campaignId, status: "SCORED", limit: 500 })
       ).slice(0, 1);
-      const readyForMessage = scored.length
-        ? []
-        : pickScope(
-            await store.listLeads({
-              campaignId: body.campaignId,
-              status: "READY_FOR_MESSAGE",
-              limit: 500,
-            })
-          ).slice(0, 1);
       const freshRaw = pickScope(
         await store.listLeads({ campaignId: body.campaignId, status: "NEW", limit: 500 })
       );
@@ -203,7 +209,18 @@ export async function POST(req: NextRequest) {
       // ارزشمندترین لیدها تحلیل شده‌اند نه یک مشت لید تصادفی.
       const fresh = [...freshRaw].sort((a, b) => (b.affluenceScore ?? 0) - (a.affluenceScore ?? 0));
 
-      const target = scored[0] ?? readyForMessage[0] ?? fresh[0];
+      const readyForMessage =
+        scored.length || fresh.length
+          ? []
+          : pickScope(
+              await store.listLeads({
+                campaignId: body.campaignId,
+                status: "READY_FOR_MESSAGE",
+                limit: 500,
+              })
+            ).slice(0, 1);
+
+      const target = scored[0] ?? fresh[0] ?? readyForMessage[0];
       if (!target) {
         return Response.json({ step: null, remaining: 0, done: true });
       }
