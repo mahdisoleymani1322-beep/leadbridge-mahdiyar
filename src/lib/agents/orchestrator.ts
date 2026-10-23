@@ -62,6 +62,7 @@ export type StepResult = {
     | "portfolio-select"
     | "message-draft"
     | "message-critic"
+    | "message-critic-unavailable"
     | "message-revise"
     | "message"
     | "none";
