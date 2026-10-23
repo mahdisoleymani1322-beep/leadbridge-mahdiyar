@@ -19,6 +19,8 @@ import type { IgProfile } from "@/lib/integrations/instagram";
  */
 
 const AGENT = "lead-analysis";
+export const LEAD_ANALYSIS_FALLBACK_FLAG =
+  "مدل هوش مصنوعی در دسترس نبود؛ این گزارش فقط بر پایه‌ی داده‌های ثبت‌شده است.";
 
 /** ورودی فشرده‌ی ایجنت — فقط داده‌ی واقعیِ موجود (بدون حدس) */
 export type LeadAnalysisInput = {
@@ -68,6 +70,71 @@ function factsBlock(input: LeadAnalysisInput): string {
   return lines.join("\n");
 }
 
+/**
+ * اگر مدل/سهمیه در دسترس نبود، یک گزارش محدود و صادقانه از فیلدهای موجود
+ * می‌سازیم تا دکمه‌ی تحلیل کل صف را متوقف نکند. این خروجی اجازه‌ی پیام‌سازی
+ * یا امتیازدهی خودکار نمی‌دهد؛ ارکستریتور لید را برای بررسی نگه می‌دارد.
+ */
+function fallbackAnalysis(lead: Lead): LeadAnalysisOutput {
+  const evidence: string[] = [];
+  if (lead.industry) evidence.push(`صنف ثبت‌شده در رکورد لید: ${lead.industry}.`);
+  if (lead.city) evidence.push(`شهر ثبت‌شده در رکورد لید: ${lead.city}.`);
+  if (lead.website) {
+    evidence.push(`نشانی وب‌سایت ثبت‌شده: ${lead.website}.`);
+  } else {
+    evidence.push("نشانی وب‌سایت در رکورد لید ثبت نشده است؛ این به‌تنهایی نبود وب‌سایت را ثابت نمی‌کند.");
+  }
+
+  const channelNames: Record<string, string> = {
+    instagram: "اینستاگرام",
+    whatsapp: "واتساپ",
+    telegram: "تلگرام",
+    email: "ایمیل",
+    phone: "تلفن",
+    siteForm: "فرم سایت",
+  };
+  const channels = Object.entries(lead.contactChannels)
+    .filter(([, value]) => Boolean(value))
+    .map(([key]) => channelNames[key] ?? key);
+  if (channels.length) evidence.push(`کانال‌های تماس ثبت‌شده: ${channels.join("، ")}.`);
+  if (lead.igNote) evidence.push(`یادداشت بررسی دستی اینستاگرام ثبت شده است: ${lead.igNote.slice(0, 180)}.`);
+  if (lead.rating != null) {
+    evidence.push(`امتیاز ثبت‌شده در نقشه: ${lead.rating} از ${lead.reviewsCount ?? 0} نظر.`);
+  }
+  if (evidence.length === 0) evidence.push(`نام کسب‌وکار ثبت‌شده: ${lead.businessName}.`);
+
+  const businessDescription = lead.industry
+    ? `در رکورد لید به‌عنوان کسب‌وکارِ حوزه‌ی «${lead.industry}» ثبت شده است`
+    : "در فهرست لیدها ثبت شده است";
+  const missingOnlineChannel = !lead.website && !lead.instagramHandle;
+
+  return LeadAnalysisOutputSchema.parse({
+    businessSummary: `«${lead.businessName}» ${businessDescription}${lead.city ? ` و شهر ثبت‌شده‌ی آن ${lead.city} است` : ""}.`,
+    targetCustomer: "مشتری هدف دقیق از داده‌های ثبت‌شده قابل‌تشخیص نیست.",
+    painPoint: `درد دیجیتالِ قابل‌استنادی برای «${lead.businessName}» در داده‌های موجود مشخص نیست؛ پیش از پیشنهاد خدمت باید وضعیت واقعی کانال‌های آنلاین بررسی شود.`,
+    needSignals: [
+      missingOnlineChannel
+        ? "نشانی وب‌سایت و شناسه‌ی اینستاگرام در رکورد ثبت نشده‌اند؛ وجود یا نبود واقعی آن‌ها باید بررسی شود."
+        : "داده‌های فعلی برای تأیید یک نیاز دیجیتال مشخص کافی نیستند.",
+    ],
+    evidence: evidence.slice(0, 4),
+    uncertainties: [
+      "گزارش به‌دلیل در دسترس نبودن مدل، از روی فیلدهای ذخیره‌شده ساخته شده است.",
+      "وضعیت واقعی وب‌سایت و شبکه‌های اجتماعی مستقلاً بررسی نشده است.",
+    ],
+    brandTone: "محترمانه و کوتاه؛ ابتدا وضعیت فعلی را با یک پرسش روشن بررسی کن.",
+    riskFlags: [LEAD_ANALYSIS_FALLBACK_FLAG],
+    confidence: 0.05,
+  });
+}
+
+function isModelAvailabilityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout|timed out|aborted|aborterror|429|rate.?limit|quota|free.?model|provider returned error|502|503|504|overloaded|unavailable|fetch failed|network/i.test(
+    message
+  );
+}
+
 export async function runLeadAnalysis(input: LeadAnalysisInput): Promise<LeadAnalysisOutput> {
   const lessons = await lessonsBlockFor(AGENT);
 
@@ -91,14 +158,15 @@ ${BRAND_CONTEXT_SHORT}
 
 ${factsBlock(input)}`;
 
-  return runAgentJSON({
-    agent: AGENT,
-    system,
-    prompt,
-    temperature: 0.3,
-    maxOutputTokens: 900,
-    schema: LeadAnalysisOutputSchema,
-    shapeHint: `{
+  try {
+    return await runAgentJSON({
+      agent: AGENT,
+      system,
+      prompt,
+      temperature: 0.3,
+      maxOutputTokens: 900,
+      schema: LeadAnalysisOutputSchema,
+      shapeHint: `{
   "businessSummary": "این کسب‌وکار چه می‌فروشد و چطور کار می‌کند (۱-۲ جمله)",
   "targetCustomer": "مشتری هدفش کیست",
   "painPoint": "درد دیجیتالِ مشخص همین کسب‌وکار",
@@ -109,5 +177,9 @@ ${factsBlock(input)}`;
   "riskFlags": [],
   "confidence": 0.7
 }`,
-  });
+    });
+  } catch (error) {
+    if (!isModelAvailabilityError(error)) throw error;
+    return fallbackAnalysis(input.lead);
+  }
 }

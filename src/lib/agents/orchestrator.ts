@@ -2,7 +2,7 @@ import "server-only";
 import { randomUUID } from "crypto";
 import { getStore, type Lead, type LeadAnalysis, type LeadStatus } from "@/lib/store";
 import { businessDiscovery, isInstagramConfigured } from "@/lib/integrations/instagram";
-import { runLeadAnalysis } from "./lead-analysis";
+import { LEAD_ANALYSIS_FALLBACK_FLAG, runLeadAnalysis } from "./lead-analysis";
 import { scoreAffluence } from "./affluence";
 import { scoreLead, type ScoreResult } from "./scoring";
 import { runServiceMatch } from "./service-match";
@@ -270,7 +270,31 @@ export async function runLeadStep(
       agentVersion: "v1",
       createdAt: new Date().toISOString(),
     });
-    await logRun("lead-analysis", "done", `درد: ${analysis.painPoint.slice(0, 80)}…`, analysis);
+    const usedFallback = analysis.riskFlags.includes(LEAD_ANALYSIS_FALLBACK_FLAG);
+    await logRun(
+      "lead-analysis",
+      "done",
+      usedFallback
+        ? "گزارش محدود از داده‌های ثبت‌شده ساخته شد؛ برای امتیازدهی و پیام، بررسی انسانی لازم است."
+        : `درد: ${analysis.painPoint.slice(0, 80)}…`,
+      analysis
+    );
+
+    if (usedFallback) {
+      await store.updateLead(leadId, {
+        status: "NURTURE",
+        score: null,
+        confidence: analysis.confidence,
+      });
+      return {
+        leadId,
+        ran: "analysis",
+        status: "NURTURE",
+        score: null,
+        done: true,
+        summary: "گزارش محدود ذخیره شد؛ لید برای بررسی انسانی نگه داشته شد.",
+      };
+    }
 
     // امتیازدهی قطعی (صفر توکن) — بلافاصله بعد از تحلیل.
     // بازار کمپین لازم است تا marketFit واقعاً تطابق را بسنجد، نه اینکه به
