@@ -165,8 +165,8 @@ export const LIMITS = {
  * قفل همزمانی و بودجه‌ی کشف همه سفت بسته بودند. گارد در جای اشتباه بود.
  */
 export const AI_LIMITS = {
-  /** Per-provider deadline keeps a fallback chain below Vercel's function timeout. */
-  providerRequestTimeoutMs: 12_000,
+  /** Free OpenRouter models often need more than 12s; leave room for three attempts inside the 60s route limit. */
+  providerRequestTimeoutMs: 16_000,
   /**
    * سقف کل درخواست upstream برای یک فراخوان منطقی ایجنت.
    *
