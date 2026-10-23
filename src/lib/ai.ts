@@ -86,7 +86,7 @@ export function modelFallbacks(): string[] {
 /** آیا این خطا با مدل دیگر قابل جبران است؟ (rate-limit / در دسترس نبودن) */
 function isRetriableModelError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
-    return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|provider returned error/i.test(
+    return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error/i.test(
       String(err)
     );
   }
@@ -96,11 +96,13 @@ function isRetriableModelError(err: unknown): boolean {
   // "Provider returned error" response, so the fallback models never run.
   const error = err as {
     message?: unknown;
+    name?: unknown;
     statusCode?: unknown;
     isRetryable?: unknown;
     responseBody?: unknown;
     cause?: unknown;
   };
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
   if (error.isRetryable === true) return true;
 
   const status = Number(error.statusCode);
@@ -111,7 +113,7 @@ function isRetriableModelError(err: unknown): boolean {
   const details = [error.message, error.responseBody]
     .filter((value): value is string => typeof value === "string")
     .join(" ");
-  if (/429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|provider returned error/i.test(details)) {
+  if (/429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error/i.test(details)) {
     return true;
   }
 
@@ -205,6 +207,7 @@ export async function runAgentText(opts: AgentCallOptions): Promise<string> {
         prompt: opts.prompt,
         temperature: opts.temperature ?? 0.7,
         maxOutputTokens: opts.maxOutputTokens ?? AI_LIMITS.defaultMaxOutputTokens,
+        abortSignal: AbortSignal.timeout(AI_LIMITS.providerRequestTimeoutMs),
       });
       if (result.text.trim()) {
         budget.lastGoodModel = model;

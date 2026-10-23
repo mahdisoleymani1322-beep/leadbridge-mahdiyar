@@ -165,6 +165,8 @@ export const LIMITS = {
  * قفل همزمانی و بودجه‌ی کشف همه سفت بسته بودند. گارد در جای اشتباه بود.
  */
 export const AI_LIMITS = {
+  /** Per-provider deadline keeps a fallback chain below Vercel's function timeout. */
+  providerRequestTimeoutMs: 12_000,
   /**
    * سقف کل درخواست upstream برای یک فراخوان منطقی ایجنت.
    *
