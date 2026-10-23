@@ -467,14 +467,33 @@ export async function runLeadStep(
 
     // ── ۴ب: پیام هست ولی نمره ندارد → منتقد ──
     if (msg.criticScore == null) {
-      const critic = await runMessageCritic({
-        message: currentText,
-        businessName: lead.businessName,
-        analysis: analysisInput,
-        serviceId: existing.recommendedService,
-        channel: lead.preferredChannel,
-        portfolioMention,
-      });
+      let critic: Awaited<ReturnType<typeof runMessageCritic>>;
+      try {
+        critic = await runMessageCritic({
+          message: currentText,
+          businessName: lead.businessName,
+          analysis: analysisInput,
+          serviceId: existing.recommendedService,
+          channel: lead.preferredChannel,
+          portfolioMention,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const summary = "نقد خودکار پیام در دسترس نبود؛ پیام برای بازبینی انسانی نگه داشته شد.";
+        await store.updateLead(leadId, { status: "MESSAGE_REVIEW" });
+        await logRun("message-critic", "error", summary, {
+          error: reason.slice(0, 300),
+          fallback: "human-review",
+        });
+        return {
+          leadId,
+          ran: "message-critic-unavailable",
+          status: "MESSAGE_REVIEW",
+          score: lead.score,
+          done: true,
+          summary,
+        };
+      }
       await store.updateMessage(msg.id, { criticScore: critic.score });
 
       // ── خودبهبودی: درس از معیارهای ضعیف (صفر توکن) ──
