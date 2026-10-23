@@ -267,7 +267,7 @@ export async function runLeadStep(
       recommendedService: "",
       riskFlags: analysis.riskFlags,
       confidence: analysis.confidence,
-      agentVersion: "v1",
+      agentVersion: analysis.riskFlags.includes(LEAD_ANALYSIS_FALLBACK_FLAG) ? "v1-fallback" : "v1",
       createdAt: new Date().toISOString(),
     });
     const usedFallback = analysis.riskFlags.includes(LEAD_ANALYSIS_FALLBACK_FLAG);

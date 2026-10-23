@@ -1,5 +1,5 @@
 import "server-only";
-import { runAgentJSON } from "@/lib/ai";
+import { newCallBudget, runAgentJSON } from "@/lib/ai";
 import { BRAND_CONTEXT_SHORT } from "@/lib/brand";
 import { lessonsBlockFor } from "./lessons";
 import { LeadAnalysisOutputSchema, type LeadAnalysisOutput } from "./types";
@@ -130,7 +130,7 @@ function fallbackAnalysis(lead: Lead): LeadAnalysisOutput {
 
 function isModelAvailabilityError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /timeout|timed out|aborted|aborterror|429|rate.?limit|quota|free.?model|provider returned error|502|503|504|overloaded|unavailable|fetch failed|network/i.test(
+  return /timeout|timed out|aborted|aborterror|429|rate.?limit|quota|free.?model|provider returned error|invalid json response|json.{0,20}(invalid|parse|valid)|502|503|504|overloaded|unavailable|fetch failed|network/i.test(
     message
   );
 }
@@ -166,6 +166,9 @@ ${factsBlock(input)}`;
       temperature: 0.3,
       maxOutputTokens: 900,
       schema: LeadAnalysisOutputSchema,
+      // یک لید ناموفق سه مدل رایگان را پشت‌سرهم امتحان نکند؛ گزارش محدود
+      // جایگزین، خطای مدل یا JSON نامعتبر را بدون خرج‌کردن تلاش‌های بیشتر پوشش می‌دهد.
+      budget: newCallBudget(1),
       shapeHint: `{
   "businessSummary": "این کسب‌وکار چه می‌فروشد و چطور کار می‌کند (۱-۲ جمله)",
   "targetCustomer": "مشتری هدفش کیست",

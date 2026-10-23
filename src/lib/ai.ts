@@ -151,7 +151,7 @@ export type CallBudget = {
   lastGoodModel: string | null;
 };
 
-export function newCallBudget(max = AI_LIMITS.maxUpstreamRequestsPerCall): CallBudget {
+export function newCallBudget(max: number = AI_LIMITS.maxUpstreamRequestsPerCall): CallBudget {
   return { used: 0, max, lastGoodModel: null };
 }
 
