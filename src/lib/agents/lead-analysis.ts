@@ -130,7 +130,7 @@ function fallbackAnalysis(lead: Lead): LeadAnalysisOutput {
 
 function isModelAvailabilityError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /timeout|timed out|aborted|aborterror|429|rate.?limit|quota|free.?model|provider returned error|invalid json response|json.{0,20}(invalid|parse|valid)|502|503|504|overloaded|unavailable|fetch failed|network/i.test(
+  return /timeout|timed out|aborted|aborterror|429|rate.?limit|quota|free.?model|provider returned error|invalid json response|json.{0,20}(invalid|parse|valid)|سقف.{0,30}درخواست|درخواست.{0,30}پر شد|سهمیه|502|503|504|overloaded|unavailable|fetch failed|network/i.test(
     message
   );
 }
