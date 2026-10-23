@@ -86,7 +86,7 @@ export function modelFallbacks(): string[] {
 /** آیا این خطا با مدل دیگر قابل جبران است؟ (rate-limit / در دسترس نبودن) */
 function isRetriableModelError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
-    return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error/i.test(
+    return /429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error|invalid json response/i.test(
       String(err)
     );
   }
@@ -113,7 +113,7 @@ function isRetriableModelError(err: unknown): boolean {
   const details = [error.message, error.responseBody]
     .filter((value): value is string => typeof value === "string")
     .join(" ");
-  if (/429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error/i.test(details)) {
+  if (/429|rate.?limit|quota|503|502|overloaded|unavailable|timeout|timed out|abort(?:ed)?|provider returned error|invalid json response/i.test(details)) {
     return true;
   }
 
